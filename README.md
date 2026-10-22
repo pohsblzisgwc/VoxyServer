@@ -82,6 +82,17 @@ drop the voxyserver, voxy & sodium jar's into the server's `mods/` folder. no ot
 
 clients just need voxy installed as normal along with voxyserver.
 
+## bandwidth optimizations (v1.2.0-beta.1+)
+
+to alleviate network pressure on servers with high player counts or limited uplink:
+
+- **64-bit Merkle-Style Region Hash Deduplication (`enableRegionHashSync`):**
+  LOD sections are grouped into 16x16 Region units (512x512 blocks). On join, the client sends hashes of its local cached regions. The server compares region hashes and skips sending regions that are already up to date on the client, eliminating up to **90%~95%** of redundant data transfer upon player reconnection.
+- **Token-Bucket Bandwidth Limiter (`maxBandwidthBytesPerSec`):**
+  Replaces rigid section count caps with a byte-level token bucket to strictly enforce maximum outgoing bandwidth per player (default ~250 KB/s), completely smoothing out sudden network spikes.
+- **Distance-Based Trickle Pacing (`enableDistancePacing`):**
+  LODs near the player (within 32 chunks) are streamed with top priority, while distant LODs (32+ chunks) are trickled over time at reduced frequency to prevent network congestion while moving or exploring.
+
 ## config
 
 config file is generated at `config/voxyserver.json` on first run.
@@ -89,7 +100,7 @@ config file is generated at `config/voxyserver.json` on first run.
 | option | default | description |
 |--------|---------|-------------|
 | `lodStreamRadius` | `256` | radius in chunks to stream LODs around each player |
-| `maxSectionsPerTickPerPlayer` | `10` | max LOD sections sent per player per tick cycle |
+| `maxSectionsPerTickPerPlayer` | `100` | max LOD sections sent per player per tick cycle |
 | `sectionsPerPacket` | `50` | max LOD sections bundled into a single network packet |
 | `tickInterval` | `5` | server ticks between each streaming cycle |
 | `workerThreads` | `3` | number of worker threads for voxy to use |
@@ -98,13 +109,16 @@ config file is generated at `config/voxyserver.json` on first run.
 | `dirtyTrackingInterval` | `40` | ticks between dirty chunk flushes (40 = 2 seconds) |
 | `debugTrackingEnabled` | `false` | output internal server stats to the console periodically |
 | `debugTrackingInterval` | `200` | ticks between dumping tracking stats (200 = 10 seconds) |
+| `maxBandwidthBytesPerSec` | `250000` | token-bucket egress bandwidth budget in bytes/s per player (~250 KB/s) |
+| `enableDistancePacing` | `true` | pace distant LOD sections at reduced rates to smooth network usage |
+| `enableRegionHashSync` | `true` | enable 64-bit Region Hash deduplication to skip already cached regions |
 
 ### example config
 
 ```json
 {
   "lodStreamRadius": 256,
-  "maxSectionsPerTickPerPlayer": 10,
+  "maxSectionsPerTickPerPlayer": 100,
   "sectionsPerPacket": 50,
   "generateOnChunkLoad": true,
   "tickInterval": 5,
@@ -112,11 +126,14 @@ config file is generated at `config/voxyserver.json` on first run.
   "dirtyTrackingEnabled": true,
   "dirtyTrackingInterval": 40,
   "debugTrackingEnabled": false,
-  "debugTrackingInterval": 200
+  "debugTrackingInterval": 200,
+  "maxBandwidthBytesPerSec": 250000,
+  "enableDistancePacing": true,
+  "enableRegionHashSync": true
 }
 ```
 
-higher `lodStreamRadius` means more LOD coverage but more storage and bandwidth. `maxSectionsPerTickPerPlayer` controls how fast LODs are sent to new players or when moving into unexplored areas. `sectionsPerPacket` controls how many sections are packed into each network packet (higher = fewer packets but larger each). lower `tickInterval` = more frequent streaming checks.
+higher `lodStreamRadius` means more LOD coverage but more storage and bandwidth. `maxSectionsPerTickPerPlayer` controls how fast LODs are sent to new players or when moving into unexplored areas. `sectionsPerPacket` controls how many sections are packed into each network packet (higher = fewer packets but larger each). lower `tickInterval` = more frequent streaming checks. `maxBandwidthBytesPerSec` strictly shapes outgoing bandwidth.
 
 ### client config
 
