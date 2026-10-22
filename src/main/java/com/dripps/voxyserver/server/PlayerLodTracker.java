@@ -42,6 +42,21 @@ public class PlayerLodTracker {
         this.ready = ready;
     }
 
+    private final it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap clientRegionHashes = new it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap();
+
+    public synchronized void updateClientRegionHashes(long[] regionKeys, long[] regionHashes) {
+        for (int i = 0; i < regionKeys.length; i++) {
+            clientRegionHashes.put(regionKeys[i], regionHashes[i]);
+        }
+    }
+
+    public synchronized boolean isRegionSynced(long regionKey) {
+        if (!clientRegionHashes.containsKey(regionKey)) return false;
+        long clientHash = clientRegionHashes.get(regionKey);
+        long serverHash = com.dripps.voxyserver.server.hash.RegionHashManager.INSTANCE.getRegionHash(regionKey);
+        return serverHash != 0L && clientHash == serverHash;
+    }
+
     public synchronized boolean hasSent(long sectionKey, int version) {
         return sentSectionVersions.get(sectionKey) == version;
     }
@@ -52,6 +67,7 @@ public class PlayerLodTracker {
 
     public synchronized void reset() {
         sentSectionVersions.clear();
+        clientRegionHashes.clear();
         resetScanStateLocked();
     }
 

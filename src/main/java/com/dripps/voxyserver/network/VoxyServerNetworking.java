@@ -13,5 +13,6 @@ public class VoxyServerNetworking {
 
         PayloadTypeRegistry.playC2S().register(LODReadyPayload.TYPE, LODReadyPayload.CODEC);
         PayloadTypeRegistry.playC2S().register(LODPreferencesPayload.TYPE, LODPreferencesPayload.CODEC);
+        PayloadTypeRegistry.playC2S().register(LODRegionSyncPayload.TYPE, LODRegionSyncPayload.CODEC);
     }
 }

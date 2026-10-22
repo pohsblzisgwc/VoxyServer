@@ -11,3 +11,7 @@ bin/
 voxy/
 voxy_old/
 libs/
+*.log
+*.tmp
+local.properties
+.DS_Store

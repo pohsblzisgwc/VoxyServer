@@ -40,6 +40,7 @@ public class LodStreamingService {
     private static final int INITIAL_LOAD_MIN_CHUNKS_AT_DEADLINE = 3;
     private static final int MAX_DIRTY_SECTIONS_PER_DRAIN = 64;
 
+    private final com.dripps.voxyserver.config.VoxyServerConfig config;
     private final ServerLodEngine engine;
     private final int lodStreamRadius;
     private final int maxSectionsPerTick;
@@ -116,6 +117,7 @@ public class LodStreamingService {
     }
 
     public LodStreamingService(ServerLodEngine engine, com.dripps.voxyserver.config.VoxyServerConfig config) {
+        this.config = config;
         this.engine = engine;
         this.lodStreamRadius = config.lodStreamRadius;
         this.maxSectionsPerTick = config.maxSectionsPerTickPerPlayer;
@@ -129,10 +131,14 @@ public class LodStreamingService {
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
             var tracker = new PlayerLodTracker();
             trackers.put(handler.getPlayer().getUUID(), tracker);
+            com.dripps.voxyserver.server.throttle.BandwidthThrottler.INSTANCE.registerPlayer(
+                    handler.getPlayer().getUUID(), config.maxBandwidthBytesPerSec);
         });
 
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
             trackers.remove(handler.getPlayer().getUUID());
+            com.dripps.voxyserver.server.throttle.BandwidthThrottler.INSTANCE.unregisterPlayer(
+                    handler.getPlayer().getUUID());
         });
 
         ServerPlayNetworking.registerGlobalReceiver(LODReadyPayload.TYPE, (payload, context) -> {
@@ -157,6 +163,15 @@ public class LodStreamingService {
             Voxyserver.LOGGER.info("player {} updated LOD preferences: enabled={}, radius={}, maxSections={}",
                     context.player().getName().getString(), payload.enabled(),
                     payload.lodStreamRadius(), payload.maxSectionsPerTick());
+        });
+
+        ServerPlayNetworking.registerGlobalReceiver(com.dripps.voxyserver.network.LODRegionSyncPayload.TYPE, (payload, context) -> {
+            var tracker = trackers.get(context.player().getUUID());
+            if (tracker != null) {
+                tracker.updateClientRegionHashes(payload.regionKeys(), payload.regionHashes());
+                Voxyserver.LOGGER.info("player {} synchronized {} cached region hashes",
+                        context.player().getName().getString(), payload.regionKeys().length);
+            }
         });
 
         ServerTickEvents.END_SERVER_TICK.register(this::onServerTick);
@@ -221,6 +236,7 @@ public class LodStreamingService {
 
         List<PlayerSnapshot> snapshots = new ArrayList<>();
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            com.dripps.voxyserver.server.throttle.BandwidthThrottler.INSTANCE.tick(player.getUUID(), currentTick);
             var tracker = trackers.get(player.getUUID());
             if (tracker == null || !tracker.isReady() || !tracker.isLodEnabled()) continue;
 
@@ -332,6 +348,20 @@ public class LodStreamingService {
             if (tracker.hasSent(key, version)) continue;
             if (isSectionPendingDirty(dimOrd, key)) continue;
 
+            // Merkle Region Hash check: skip sections in regions already in sync with client
+            long regKey = com.dripps.voxyserver.server.hash.RegionHashManager.getRegionKeyForSection(dimOrd, key);
+            if (config.enableRegionHashSync && tracker.isRegionSynced(regKey)) {
+                continue;
+            }
+
+            // Distance-based pacing check: throttle distant sections to smooth network load
+            int secX = WorldEngine.getX(key);
+            int secZ = WorldEngine.getZ(key);
+            int distSec = Math.max(Math.abs(secX - playerWorldSecX), Math.abs(secZ - playerWorldSecZ));
+            if (!com.dripps.voxyserver.server.throttle.BandwidthThrottler.INSTANCE.checkDistancePacing(distSec, sent, config.enableDistancePacing)) {
+                continue;
+            }
+
             WorldSection section = world.acquireIfExists(key);
             if (section == null) continue;
 
@@ -372,7 +402,9 @@ public class LodStreamingService {
                 if (player == null) return;
                 if (!player.level().dimension().identifier().equals(dim)) return;
                 for (PreSerializedLodPayload pkt : preEncoded) {
-                    ServerPlayNetworking.send(player, pkt);
+                    if (com.dripps.voxyserver.server.throttle.BandwidthThrottler.INSTANCE.canSend(playerId, pkt.data().length)) {
+                        ServerPlayNetworking.send(player, pkt);
+                    }
                 }
             });
         }
@@ -381,6 +413,8 @@ public class LodStreamingService {
     private LODSectionPayload serializeSection(WorldSection section, Identifier dimension,
                                                 Mapper mapper, Registry<Biome> biomeRegistry) {
         long[] data = section.copyData();
+        com.dripps.voxyserver.server.hash.RegionHashManager.INSTANCE.updateSectionHash(
+                dimOrdinals.getOrdinal(dimension), section.key, data);
 
         // build LUT of unique mapping ids
         Long2ShortOpenHashMap lutMap = new Long2ShortOpenHashMap();

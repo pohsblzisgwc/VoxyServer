@@ -29,10 +29,11 @@ import java.util.Optional;
 public class ClientLodReceiver {
 
     public static void register() {
-        // send ready handshake when joining a server
+        // send ready handshake and cached region hashes when joining a server
         ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
             ClientLodSettings.prepareForCurrentConnection();
             ClientPlayNetworking.send(new LODReadyPayload());
+            sendCachedRegionHashes();
         });
 
         ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
@@ -133,5 +134,20 @@ public class ClientLodReceiver {
     private static void handleClear(LODClearPayload payload) {
         // dimension change clear is handled by voxy itself when the world changes
         // this is a signal from the server to reset any cached state
+    }
+
+    private static final it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap clientRegionHashes = new it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap();
+
+    public static void sendCachedRegionHashes() {
+        if (clientRegionHashes.isEmpty()) return;
+        ClientLevel level = Minecraft.getInstance().level;
+        if (level == null) return;
+        long[] keys = clientRegionHashes.keySet().toLongArray();
+        long[] hashes = new long[keys.length];
+        for (int i = 0; i < keys.length; i++) {
+            hashes[i] = clientRegionHashes.get(keys[i]);
+        }
+        ClientPlayNetworking.send(new com.dripps.voxyserver.network.LODRegionSyncPayload(
+                level.dimension().identifier(), keys, hashes));
     }
 }

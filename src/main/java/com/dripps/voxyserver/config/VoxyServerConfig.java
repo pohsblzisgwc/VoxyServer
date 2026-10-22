@@ -24,6 +24,11 @@ public class VoxyServerConfig {
     public boolean debugTrackingEnabled = false;
     public int debugTrackingInterval = 200;
 
+    // Demo optimizations: Bandwidth Throttling & Hash Sync
+    public int maxBandwidthBytesPerSec = 250_000; // ~250 KB/s per player token budget
+    public boolean enableDistancePacing = true;   // Distant LOD trickle feed
+    public boolean enableRegionHashSync = true;   // Merkle-style Region Hash deduplication
+
     public static VoxyServerConfig load() {
         Path configPath = FabricLoader.getInstance().getConfigDir().resolve(FILE_NAME);
         if (Files.exists(configPath)) {
