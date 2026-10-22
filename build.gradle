@@ -39,6 +39,10 @@ repositories {
             includeGroup "maven.modrinth"
         }
     }
+    maven {
+        name = "Fabric"
+        url = "https://maven.fabricmc.net/"
+    }
     maven { url = "https://maven.terraformersmc.com/" }
     maven { url = "https://maven.shedaniel.me/" }
     mavenCentral()
