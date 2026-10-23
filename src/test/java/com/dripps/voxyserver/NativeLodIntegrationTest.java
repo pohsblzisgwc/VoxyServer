@@ -17,6 +17,7 @@ import net.minecraft.core.*;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.*;
 import net.minecraft.server.Bootstrap;
+import net.minecraft.server.level.TicketType;
 import net.minecraft.world.level.biome.*;
 import net.minecraft.world.level.block.Blocks;
 
@@ -33,6 +34,12 @@ public final class NativeLodIntegrationTest {
     public static void runAllTests() throws Exception {
         SharedConstants.tryDetectVersion();
         Bootstrap.bootStrap();
+        com.dripps.voxyserver.server.background.BackgroundChunkGeneration.registerTicketType();
+        var backgroundTicket=com.dripps.voxyserver.server.background.BackgroundChunkGeneration.ticketType();
+        require(backgroundTicket.doesLoad()&&!backgroundTicket.doesSimulate()&&!backgroundTicket.persist()
+                &&!backgroundTicket.canExpireIfUnloaded()&&backgroundTicket.timeout()>0,
+                "background generation ticket can persist, tick entities, or expire before loading");
+        require(!backgroundTicket.equals(TicketType.PLAYER_LOADING),"background ticket aliases player loading");
         // Loading, rather than reading bytecode signatures, checks every required server mixin's
         // targets.
         for (String name :

@@ -6,14 +6,14 @@ a fabric server side mod that voxelizes chunks into LODs using [voxy](https://gi
 
 ## how it works
 
-The development branch uses **protocol 5** on Fabric / Minecraft 26.3. Both sides must update together. Published `v1.2.5` (`4deea7a`) is unchanged; development artifacts remain `1.2.6-dev`.
+Release **v1.2.6** uses **protocol 5** on Fabric / Minecraft 26.3. Both sides must update together. Published `v1.2.5` (`4deea7a`) is unchanged.
 
 The client derives demand from Voxy's actual render subscriptions at native LOD levels **0–4**. Each node contains 32³ voxels and spans `32 << level` blocks. Voxy's `sectionRenderDistance` uses **512-block top-level units**: values 16 and 32 mean 512 and 1024 Minecraft chunks. The remote range is capped by the native view, personal preference and server maximum. The server validates the requested coordinates, dimension, epoch and rate without enumerating the view grid or the database.
 
 1. Client compares one semantic digest and coverage mask per fixed 4×4×4 group **at the same LOD**.
 2. When that group differs, client supplies hashes only for its server-present leaves. The server sends only differing/missing native nodes. Native child topology participates in the proof; a coarse voxel hash is never treated as a digest of its finer descendants.
 3. Stable groups audit again after a randomized **150–210 seconds**. Newly watched nodes and changed groups start earlier. One client proof worker reads actual local data, with round-robin groups and bounded hashing; a second worker ingests received data. Native Voxy ingestion remains enabled.
-4. A single server maintenance worker coalesces source changes, updates native LODs and fills a shared on-demand hash index. Block/light/biome notifications only mark source bits. There is no startup world enumeration, player spiral scanner, automatic full import or per-block hash computation.
+4. A single server maintenance worker coalesces source changes, updates native LODs and fills a shared on-demand hash index. Block/light/biome notifications only mark source bits. There is no startup world enumeration, player spiral scanner, automatic full import or per-block hash computation. Optional background world generation uses bounded point sampling as described below.
 
 Clients are **overwrite-only**. A real server node, including an explicitly stored all-air node, may replace that same native node. Missing or unreadable server nodes never clear local terrain. Coarse updates preserve independently cached finer nodes and child references. The server's absence is not synthesized as an all-air replacement, including when Voxy returns a cached missing-node placeholder.
 
@@ -130,6 +130,54 @@ Dirty work, including the active item, is journaled about every 30 seconds and o
 
 A nonpreemptible node/source operation may finish beyond the configured worker allowance; that allowance is not a hard CPU/TPS guarantee. Main-thread captures, Voxy's own compression/save workers, manual imports and periodic journal/lease metadata are additional costs. Debug logs expose worker CPU/wall time, maximum work quantum, main capture time, hashes/cache hits, matched groups, actual sends, retries/ACK timeouts and per-player queue peaks/rejections/evictions. Saturated budgets delay convergence rather than moving heavy work onto the main thread.
 
+### optional background generation
+
+This side path slowly generates full Minecraft chunks near players, then marks their source sections for the existing asynchronous LOD maintenance worker. It is **disabled by default**. It samples an annulus, rotates between players, and never enumerates the view grid or region database. Targets stay outside the player's effective vanilla view plus two chunks, inside the configured radius and dimension whitelist, and inside the world border. A zero-width effective annulus produces no work. Spectators are excluded by default.
+
+Before generation, targeted vanilla pending-save I/O checks the candidate. Already stored FULL chunks are skipped without loading them; known partial chunks may be completed. Unknown/corrupt status data is a failure, not permission to replace a chunk. Duplicate in-flight coordinates are suppressed across players; a bounded recent-target cache avoids frequent rechecks.
+
+| setting | default | meaning |
+|---------|---------|---------|
+| `backgroundGenerationEnabled` | `false` | enable the optional path; all settings here apply live |
+| `backgroundGenerationMinRadiusChunks` | `16` | inner target radius in Minecraft chunks, raised to at least effective vanilla view + 2 |
+| `backgroundGenerationMaxRadiusChunks` | `64` | outer target radius, greater than minimum, at most 1024 |
+| `backgroundGenerationChunksPerMinute` | `6` | global generation-start cap, evenly spaced with no accumulated catch-up burst; 1..600 |
+| `backgroundGenerationMaxConcurrent` | `1` | total pending/ready/generating/held/draining jobs, 1..4 across all players |
+| `backgroundGenerationCheckIntervalTicks` | `100` | ticks between candidate passes; native cancellations and completions are still checked each tick |
+| `backgroundGenerationCandidatesPerPass` | `4` | maximum constant-size candidate attempts per pass, 1..64 |
+| `backgroundGenerationMaxProbeMillis` | `1` | soft main-thread scheduler/probe allowance per pass, 1..5 ms; does not cap native generation time |
+| `backgroundGenerationStartMspt` | `25.0` | headroom required to admit generation; finite, positive |
+| `backgroundGenerationStopMspt` | `35.0` | cancel owned work immediately when observed MSPT exceeds this; must exceed start MSPT |
+| `backgroundGenerationResumeDelayTicks` | `600` | continuous below-start ticks required before initial admission or recovery; 600 = 30 seconds at 20 TPS |
+| `backgroundGenerationTimeoutSeconds` | `20` | wall-clock deadline from initial probe to completed target, 1..30 seconds |
+| `backgroundGenerationKeepLoadedTicks` | `60` | short hold for LOD capture after FULL completion, 0..1200 ticks; the LOD queue can also read saved chunks later |
+| `backgroundGenerationMaxPendingLodSections` | `256` | suspend and release work above this source backlog; 0 disables this additional gate |
+| `backgroundGenerationHistorySize` | `4096` | recent coordinate cache limit, 1..65536 |
+| `backgroundGenerationRecheckSeconds` | `600` | minimum repeat-probe delay for a recently selected coordinate |
+| `backgroundGenerationDimensions` | `["minecraft:overworld"]` | explicit nonempty allowlist; namespaced identifiers, up to 64 |
+| `backgroundGenerationIncludeSpectators` | `false` | allow spectator positions to seed candidates |
+
+Enable and tune through the validated configuration file, `/voxyserver reload`, or commands, for example:
+
+```text
+/voxyserver config set backgroundGenerationEnabled true
+/voxyserver config set backgroundGenerationMaxRadiusChunks 64
+/voxyserver config set backgroundGenerationChunksPerMinute 6
+/voxyserver config set backgroundGenerationStartMspt 25.0
+/voxyserver config set backgroundGenerationStopMspt 35.0
+/voxyserver config set backgroundGenerationDimensions ["minecraft:overworld"]
+```
+
+Commands support fractional MSPT values and JSON dimension lists and use the same validation as startup/reload. Background-only changes cancel their owned work but **do not restart all client stream sessions**. No runtime downloads or new production dependencies are introduced.
+
+The sampler observes the maximum of the current measured tick, vanilla average MSPT and smoothed MSPT. Between start and stop thresholds, existing work can finish but new generation is withheld. Overload, pause/backlog, hot disable, player movement/disconnect/dimension change, timeout or shutdown releases this mod's loading-only tickets. They do not request entity/block ticking or persistent forced loading. Completion only queues source bits; it never forces full-resolution data transmission.
+
+**Cancellation boundary:** once vanilla has dispatched world-generation tasks, they may be shared with real players and cannot safely be force-interrupted. The scheduler removes only its own tickets immediately, discards later callbacks, and still counts unfinished native work against concurrency until it drains. It does not cancel shared futures, force-unload player chunks, or launch replacements on top of unfinished canceled work. This is immediate cancellation of this mod's demand, not a promise that all native CPU work stops in the same instant. A native future that never resolves blocks further admissions to that slot rather than allowing unbounded replacement work.
+
+Minecraft generates dependency halos for a target; the configured radii/rate count **requested target chunks**, not every neighbor generated by the native pipeline. Native generation and synchronous ticket-graph setup can exceed the scheduler's soft allowance; the generator is not a hard CPU/MSPT guarantee. After ticket setup, load is sampled again and excessive tick time immediately closes admission. Large modded generators require correspondingly conservative settings. `/voxyserver stats` reports scheduler state, MSPT, completed targets, tickets, draining jobs and failures. Debug reports additionally include probes/skips, starts/completions, failures/last error, cancellations/timeouts, live tickets and canceled-but-draining jobs.
+
+The scheduler regression simulates 1,200 ticks with concurrent jobs and a high-MSPT interval, verifies strict start spacing, immediate ticket release, finite timeouts, retained concurrency debt and recovery, and covers late I/O/native completions, hot reload, candidate bounds and coordinate arithmetic. Native pre-launch checks validate the registered ticket flags. Actual chunk generation under a running server and its sustained MSPT/storage effects have **not** been load-tested here.
+
 ### proof and delivery state
 
 Before: the server enumerated a full-resolution view grid and reconciled paged client inventories; moving or exhausted scans could create substantial repeated work. The retained v4 transaction/pacing regression fixtures protect those earlier correctness fixes, but the production protocol no longer starts those scans or inventory transactions.
@@ -174,9 +222,9 @@ Run with JDK 25 and the compatible Voxy jar in `libs/`:
 ./scripts/test-semantic-sync.sh
 ```
 
-The **15 standalone suites** include proof changes/deletions, duplicate/out-of-order messages, late ACKs, timeout recovery, range isolation, fair bounded mailboxes, source quiet/cooldown/retry/journal behavior, invalidation races, configuration boundaries, semantic registry differences and queue saturation. Both Fabric pre-launch checks apply the real server/client mixins and exercise real Voxy worlds/mappers, native ingest, missing-node placeholders, coarse/fine preservation and source-update locking. They exit before opening a world, network listener, renderer or display. The client check validates that the renderer mixin targets apply; it does not run the live render loop. Test-only classes/resources and the Sodium test runtime do not enter the release jar. Bundled LWJGL core/native versions match Minecraft 26.3's 3.4.3 to avoid a native-library mismatch.
+The **16 standalone suites** include proof changes/deletions, duplicate/out-of-order messages, late ACKs, timeout recovery, range isolation, fair bounded mailboxes, source quiet/cooldown/retry/journal behavior, invalidation races, configuration boundaries, semantic registry differences and queue saturation. Both Fabric pre-launch checks apply the real server/client mixins and exercise real Voxy worlds/mappers, native ingest, missing-node placeholders, coarse/fine preservation and source-update locking. They exit before opening a world, network listener, renderer or display. The client check validates that the renderer mixin targets apply; it does not run the live render loop. Test-only classes/resources and the Sodium test runtime do not enter the release jar. Bundled LWJGL core/native versions match Minecraft 26.3's 3.4.3 to avoid a native-library mismatch.
 
-Still unverified: a real multi-client Minecraft session, live renderer refinement and missing-parent behavior, sustained TPS and storage throughput on a large explored map, latency while large ingest backlogs drain, and actual total bandwidth savings. User file replacement under a running server is unsupported. Fixed cache/subscription limits may cause extra revalidation in very large/dispersed views. The first connection and cold caches can converge slowly under deliberately low global budgets. Do not treat these results as production-safety or end-to-end certification.
+Still unverified: background generation under real server load, a real multi-client Minecraft session, live renderer refinement and missing-parent behavior, sustained TPS and storage throughput on a large explored map, latency while large ingest backlogs drain, and actual total bandwidth savings. User file replacement under a running server is unsupported. Fixed cache/subscription limits may cause extra revalidation in very large/dispersed views. The first connection and cold caches can converge slowly under deliberately low global budgets. Do not treat these results as production-safety or end-to-end certification.
 
 ### restoring a world backup
 

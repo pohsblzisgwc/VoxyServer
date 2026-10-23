@@ -802,6 +802,8 @@ public final class LodStreamingService {
                         config.maxClientVoxyRadius, config.maxSectionsPerTickPerPlayer));
     }
 
+    public int pendingSourceSections() {return source.dirty.dirtyCells();}
+
     public void markSourceDirty(ServerLevel level, int blockX, int blockY, int blockZ) {
         source.mark(level, blockX, blockY, blockZ);
     }

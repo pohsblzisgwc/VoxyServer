@@ -192,7 +192,7 @@ public final class VoxyServerCommands {
         for (Field f : VoxyServerConfig.class.getFields()) {
             if (Modifier.isStatic(f.getModifiers())) continue;
             Class<?> t = f.getType();
-            if (t == int.class || t == boolean.class) keys.add(f.getName());
+            if (com.dripps.voxyserver.config.ConfigValueParser.supports(t)) keys.add(f.getName());
         }
         return keys;
     }
@@ -202,7 +202,7 @@ public final class VoxyServerCommands {
             if (Modifier.isStatic(f.getModifiers())) continue;
             if (!f.getName().equals(key)) continue;
             Class<?> t = f.getType();
-            if (t == int.class || t == boolean.class) return f;
+            if (com.dripps.voxyserver.config.ConfigValueParser.supports(t)) return f;
         }
         return null;
     }
@@ -271,11 +271,10 @@ public final class VoxyServerCommands {
 
         String value = rawValue.trim();
         Object parsed;
-        boolean isInt = f.getType() == int.class;
         try {
-            parsed = isInt ? Integer.parseInt(value) : parseBoolStrict(value);
-        } catch (IllegalArgumentException e) {
-            source.sendFailure(Component.literal(key + " expects " + (isInt ? "an integer" : "true or false") + ", got: " + value));
+            parsed = com.dripps.voxyserver.config.ConfigValueParser.parse(f.getType(),value);
+        } catch (RuntimeException e) {
+            source.sendFailure(Component.literal("invalid value for " + key + ": " + e.getMessage()));
             return 0;
         }
 
@@ -663,6 +662,17 @@ public final class VoxyServerCommands {
                     .append(kvc("debuglog", onOffComp(cfg.debugTrackingEnabled))).append(sep())
                     .append(kv("radius", cfg.lodStreamRadius, ChatFormatting.WHITE)).append(sep())
                     .append(kv("maxpertick", cfg.maxSectionsPerTickPerPlayer, ChatFormatting.WHITE));
+        }
+
+        var background=mod.getBackgroundGenerationStats();
+        if(background!=null) {
+            out.append(Component.literal("\n"))
+                    .append(kv("background",background.state(),ChatFormatting.AQUA)).append(sep())
+                    .append(kv("MSPT",String.format(java.util.Locale.ROOT,"%.1f",background.mspt()),ChatFormatting.WHITE)).append(sep())
+                    .append(kv("targets",background.completed(),ChatFormatting.WHITE)).append(sep())
+                    .append(kv("tickets",background.tickets(),ChatFormatting.WHITE)).append(sep())
+                    .append(kv("draining",background.draining(),ChatFormatting.WHITE)).append(sep())
+                    .append(kv("failed",background.failed(),ChatFormatting.WHITE));
         }
 
         for (LodStreamingService.PlayerStat p : s.perPlayer()) {

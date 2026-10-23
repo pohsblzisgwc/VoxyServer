@@ -14,9 +14,10 @@ public class TestRunner {
         System.out.println("=================================================\n");
 
         int passedSuites = 0;
-        int totalSuites = 15;
+        int totalSuites = 16;
 
         try {
+            BackgroundGenerationTest.runAllTests();passedSuites++;
             DemandProtocolTest.runAllTests();passedSuites++;
             DemandStateTest.runAllTests();passedSuites++;
             DirtyMaintenanceTest.runAllTests();passedSuites++;
