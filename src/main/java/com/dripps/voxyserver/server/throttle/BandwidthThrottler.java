@@ -23,12 +23,12 @@ public class BandwidthThrottler {
     private final ConcurrentHashMap<UUID, PlayerOutboundQueue> playerQueues = new ConcurrentHashMap<>();
 
     public static class TokenBucket {
-        private final long bytesPerSecond;
-        private final long maxBurst;
+        private volatile long bytesPerSecond;
+        private volatile long maxBurst;
         private long availableTokens;
         private long lastRefillNanos;
         private long lastRefillTick = -1;
-        private final boolean unlimited;
+        private volatile boolean unlimited;
 
         public TokenBucket(long bytesPerSecond) {
             this.bytesPerSecond = bytesPerSecond;
@@ -43,6 +43,21 @@ public class BandwidthThrottler {
                 this.maxBurst = Math.max(bytesPerSecond * 2L, (long) MIN_BURST_BYTES);
                 this.availableTokens = Math.min(this.maxBurst, Math.max(bytesPerSecond, (long) MIN_BURST_BYTES));
                 this.lastRefillNanos = System.nanoTime();
+            }
+        }
+
+        public synchronized void updateRate(long newBytesPerSecond) {
+            this.bytesPerSecond = newBytesPerSecond;
+            if (newBytesPerSecond <= 0) {
+                this.unlimited = true;
+                this.maxBurst = Long.MAX_VALUE;
+                this.availableTokens = Long.MAX_VALUE;
+            } else {
+                this.unlimited = false;
+                this.maxBurst = Math.max(newBytesPerSecond * 2L, (long) MIN_BURST_BYTES);
+                if (this.availableTokens > this.maxBurst) {
+                    this.availableTokens = this.maxBurst;
+                }
             }
         }
 
@@ -129,6 +144,12 @@ public class BandwidthThrottler {
             return queue.clearAndDrain();
         }
         return Collections.emptyList();
+    }
+
+    public void updateAllBandwidth(long bytesPerSecond) {
+        for (TokenBucket bucket : playerBuckets.values()) {
+            bucket.updateRate(bytesPerSecond);
+        }
     }
 
     public void tick(UUID uuid, long currentTick) {

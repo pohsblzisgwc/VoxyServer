@@ -4,6 +4,8 @@ import com.dripps.voxyserver.Voxyserver;
 import com.dripps.voxyserver.config.VoxyServerConfig;
 import com.dripps.voxyserver.util.ServerStatsTracker;
 import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.arguments.BoolArgumentType;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.suggestion.SuggestionProvider;
 import net.minecraft.ChatFormatting;
@@ -33,6 +35,52 @@ public final class VoxyServerCommands {
         dispatcher.register(
                 Commands.literal("voxyserver")
                         .requires(source -> source.permissions().hasPermission(Permissions.COMMANDS_ADMIN))
+                        .executes(context -> showHelp(context.getSource()))
+                        .then(Commands.literal("help")
+                                .executes(context -> showHelp(context.getSource())))
+                        .then(Commands.literal("reload")
+                                .executes(context -> configReload(context.getSource(), mod)))
+                        .then(Commands.literal("radius")
+                                .executes(context -> getRadius(context.getSource()))
+                                .then(Commands.argument("chunks", IntegerArgumentType.integer(1, 4096))
+                                        .executes(context -> setRadius(context.getSource(), mod, IntegerArgumentType.getInteger(context, "chunks")))))
+                        .then(Commands.literal("bandwidth")
+                                .executes(context -> getBandwidth(context.getSource()))
+                                .then(Commands.argument("bytesPerSec", IntegerArgumentType.integer(0))
+                                        .executes(context -> setBandwidth(context.getSource(), mod, IntegerArgumentType.getInteger(context, "bytesPerSec")))))
+                        .then(Commands.literal("threads")
+                                .executes(context -> getThreads(context.getSource()))
+                                .then(Commands.argument("count", IntegerArgumentType.integer(1, 32))
+                                        .executes(context -> setThreads(context.getSource(), mod, IntegerArgumentType.getInteger(context, "count")))))
+                        .then(Commands.literal("hashsync")
+                                .executes(context -> getHashSync(context.getSource()))
+                                .then(Commands.argument("enabled", BoolArgumentType.bool())
+                                        .executes(context -> setHashSync(context.getSource(), mod, BoolArgumentType.getBool(context, "enabled")))))
+                        .then(Commands.literal("pacing")
+                                .executes(context -> getPacing(context.getSource()))
+                                .then(Commands.argument("enabled", BoolArgumentType.bool())
+                                        .executes(context -> setPacing(context.getSource(), mod, BoolArgumentType.getBool(context, "enabled")))))
+                        .then(Commands.literal("regionhash")
+                                .executes(context -> getRegionHash(context.getSource()))
+                                .then(Commands.argument("enabled", BoolArgumentType.bool())
+                                        .executes(context -> setRegionHash(context.getSource(), mod, BoolArgumentType.getBool(context, "enabled")))))
+                        .then(Commands.literal("config")
+                                .then(Commands.literal("list")
+                                        .executes(context -> configList(context.getSource())))
+                                .then(Commands.literal("reload")
+                                        .executes(context -> configReload(context.getSource(), mod)))
+                                .then(Commands.literal("get")
+                                        .then(Commands.argument("key", StringArgumentType.string())
+                                                .suggests(KEY_SUGGEST)
+                                                .executes(context -> configGet(context.getSource(),
+                                                        StringArgumentType.getString(context, "key")))))
+                                .then(Commands.literal("set")
+                                        .then(Commands.argument("key", StringArgumentType.string())
+                                                .suggests(KEY_SUGGEST)
+                                                .then(Commands.argument("value", StringArgumentType.greedyString())
+                                                        .executes(context -> configSet(context.getSource(), mod,
+                                                                StringArgumentType.getString(context, "key"),
+                                                                StringArgumentType.getString(context, "value")))))))
                         .then(Commands.literal("import")
                                 .then(Commands.literal("existing")
                                         .then(Commands.literal("all")
@@ -64,21 +112,6 @@ public final class VoxyServerCommands {
                                                 .executes(context -> executeStatus(context.getSource(), coordinatorSupplier)))
                                         .then(Commands.literal("cancel")
                                                 .executes(context -> executeCancel(context.getSource(), coordinatorSupplier)))))
-                        .then(Commands.literal("config")
-                                .then(Commands.literal("list")
-                                        .executes(context -> configList(context.getSource())))
-                                .then(Commands.literal("get")
-                                        .then(Commands.argument("key", StringArgumentType.string())
-                                                .suggests(KEY_SUGGEST)
-                                                .executes(context -> configGet(context.getSource(),
-                                                        StringArgumentType.getString(context, "key")))))
-                                .then(Commands.literal("set")
-                                        .then(Commands.argument("key", StringArgumentType.string())
-                                                .suggests(KEY_SUGGEST)
-                                                .then(Commands.argument("value", StringArgumentType.greedyString())
-                                                        .executes(context -> configSet(context.getSource(), mod,
-                                                                StringArgumentType.getString(context, "key"),
-                                                                StringArgumentType.getString(context, "value")))))))
                         .then(Commands.literal("stats")
                                 .executes(context -> statsOnce(context.getSource(), mod))
                                 .then(Commands.literal("continuous")
@@ -91,12 +124,12 @@ public final class VoxyServerCommands {
     private static final SuggestionProvider<CommandSourceStack> KEY_SUGGEST =
             (context, builder) -> SharedSuggestionProvider.suggest(configKeys(), builder);
 
-    static String ballsack = "import coordinator is not ready";
+    private static final String COORDINATOR_NOT_READY = "import coordinator is not ready";
 
     private static int executeAll(CommandSourceStack source, Supplier<WorldImportCoordinator> coordinatorSupplier, boolean force) {
         WorldImportCoordinator coordinator = coordinatorSupplier.get();
         if (coordinator == null) {
-            source.sendFailure(Component.literal(ballsack));
+            source.sendFailure(Component.literal(COORDINATOR_NOT_READY));
             return 0;
         }
         return coordinator.startAll(source, force) ? 1 : 0;
@@ -105,7 +138,7 @@ public final class VoxyServerCommands {
     private static int executeCurrent(CommandSourceStack source, Supplier<WorldImportCoordinator> coordinatorSupplier, boolean force) {
         WorldImportCoordinator coordinator = coordinatorSupplier.get();
         if (coordinator == null) {
-            source.sendFailure(Component.literal(ballsack));
+            source.sendFailure(Component.literal(COORDINATOR_NOT_READY));
             return 0;
         }
         return coordinator.startCurrent(source, force) ? 1 : 0;
@@ -114,7 +147,7 @@ public final class VoxyServerCommands {
     private static int executeDimension(CommandSourceStack source, Supplier<WorldImportCoordinator> coordinatorSupplier, String dimensionId, boolean force) {
         WorldImportCoordinator coordinator = coordinatorSupplier.get();
         if (coordinator == null) {
-            source.sendFailure(Component.literal(ballsack));
+            source.sendFailure(Component.literal(COORDINATOR_NOT_READY));
             return 0;
         }
 
@@ -129,7 +162,7 @@ public final class VoxyServerCommands {
     private static int executeStatus(CommandSourceStack source, Supplier<WorldImportCoordinator> coordinatorSupplier) {
         WorldImportCoordinator coordinator = coordinatorSupplier.get();
         if (coordinator == null) {
-            source.sendFailure(Component.literal(ballsack));
+            source.sendFailure(Component.literal(COORDINATOR_NOT_READY));
             return 0;
         }
         source.sendSuccess(() -> Component.literal(coordinator.getStatusSummary()), false);
@@ -139,7 +172,7 @@ public final class VoxyServerCommands {
     private static int executeCancel(CommandSourceStack source, Supplier<WorldImportCoordinator> coordinatorSupplier) {
         WorldImportCoordinator coordinator = coordinatorSupplier.get();
         if (coordinator == null) {
-            source.sendFailure(Component.literal(ballsack));
+            source.sendFailure(Component.literal(COORDINATOR_NOT_READY));
             return 0;
         }
         return coordinator.cancel(source) ? 1 : 0;
@@ -174,6 +207,12 @@ public final class VoxyServerCommands {
         return null;
     }
 
+    private static boolean isLiveReloadable(String key) {
+        return !key.equals("generateOnChunkLoad")
+                && !key.equals("generateOnChunkUnload")
+                && !key.equals("dirtyTrackingEnabled");
+    }
+
     private static int configList(CommandSourceStack source) {
         VoxyServerConfig cfg = Voxyserver.getConfig();
         if (cfg == null) {
@@ -183,8 +222,14 @@ public final class VoxyServerCommands {
         MutableComponent out = block("config");
         try {
             for (String key : configKeys()) {
+                Field f = findConfigField(key);
+                Object val = f.get(cfg);
+                boolean live = isLiveReloadable(key);
                 out.append(Component.literal("\n"))
-                        .append(kv(key, findConfigField(key).get(cfg), ChatFormatting.WHITE));
+                        .append(Component.literal("  " + key + " = ").withStyle(ChatFormatting.AQUA))
+                        .append(Component.literal(String.valueOf(val)).withStyle(ChatFormatting.WHITE))
+                        .append(Component.literal(live ? "  [live]" : "  [restart required]")
+                                .withStyle(live ? ChatFormatting.DARK_GREEN : ChatFormatting.RED));
             }
         } catch (IllegalAccessException e) {
             source.sendFailure(Component.literal("failed to read config"));
@@ -208,7 +253,10 @@ public final class VoxyServerCommands {
             source.sendFailure(Component.literal("failed to read " + key));
             return 0;
         }
-        MutableComponent line = kv(key, val, ChatFormatting.WHITE);
+        boolean live = isLiveReloadable(key);
+        MutableComponent line = kv(key, val, ChatFormatting.WHITE)
+                .append(Component.literal(live ? "  [live]" : "  [restart required]")
+                        .withStyle(live ? ChatFormatting.DARK_GREEN : ChatFormatting.RED));
         source.sendSuccess(() -> line, false);
         return 1;
     }
@@ -239,6 +287,13 @@ public final class VoxyServerCommands {
             return 0;
         }
 
+        // Keep maxClientVoxyRadius and lodStreamRadius in sync
+        if (key.equals("maxClientVoxyRadius")) {
+            candidate.lodStreamRadius = candidate.maxClientVoxyRadius;
+        } else if (key.equals("lodStreamRadius")) {
+            candidate.maxClientVoxyRadius = candidate.lodStreamRadius;
+        }
+
         List<String> errors = candidate.validate();
         if (!errors.isEmpty()) {
             source.sendFailure(Component.literal("invalid: " + String.join("; ", errors)));
@@ -246,11 +301,288 @@ public final class VoxyServerCommands {
         }
 
         List<String> notes = mod.applyConfigFromCommand(candidate);
-        MutableComponent ok = Component.literal("set ").withStyle(ChatFormatting.GREEN)
+        MutableComponent ok = Component.literal("[VoxyServer] ").withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD)
+                .append(Component.literal("set ").withStyle(ChatFormatting.GREEN))
                 .append(Component.literal(key).withStyle(ChatFormatting.AQUA))
                 .append(Component.literal(" = ").withStyle(ChatFormatting.GRAY))
                 .append(Component.literal(value).withStyle(ChatFormatting.WHITE))
-                .append(Component.literal(" (saved)").withStyle(ChatFormatting.DARK_GREEN));
+                .append(Component.literal(" (saved & applied live)").withStyle(ChatFormatting.DARK_GREEN));
+        source.sendSuccess(() -> ok, true);
+        for (String note : notes) {
+            source.sendSuccess(() -> Component.literal("note: " + note).withStyle(ChatFormatting.YELLOW), false);
+        }
+        return 1;
+    }
+
+    private static int showHelp(CommandSourceStack source) {
+        VoxyServerConfig cfg = Voxyserver.getConfig();
+        MutableComponent out = Component.literal("=== VoxyServer Admin Commands ===").withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD);
+        out.append(Component.literal("\n/voxyserver radius [chunks] ").withStyle(ChatFormatting.YELLOW))
+                .append(Component.literal("- Get or set client LOD view radius (1-4096)").withStyle(ChatFormatting.GRAY));
+        out.append(Component.literal("\n/voxyserver bandwidth [bytes/s] ").withStyle(ChatFormatting.YELLOW))
+                .append(Component.literal("- Get or set outbound bandwidth limit (0=unlimited)").withStyle(ChatFormatting.GRAY));
+        out.append(Component.literal("\n/voxyserver hashsync [true|false] ").withStyle(ChatFormatting.YELLOW))
+                .append(Component.literal("- Get or set incremental hash synchronization").withStyle(ChatFormatting.GRAY));
+        out.append(Component.literal("\n/voxyserver pacing [true|false] ").withStyle(ChatFormatting.YELLOW))
+                .append(Component.literal("- Get or set distance-based packet pacing").withStyle(ChatFormatting.GRAY));
+        out.append(Component.literal("\n/voxyserver regionhash [true|false] ").withStyle(ChatFormatting.YELLOW))
+                .append(Component.literal("- Get or set 512x512 region hash synchronization").withStyle(ChatFormatting.GRAY));
+        out.append(Component.literal("\n/voxyserver threads [1-32] ").withStyle(ChatFormatting.YELLOW))
+                .append(Component.literal("- Get or set LOD meshing worker thread count").withStyle(ChatFormatting.GRAY));
+        out.append(Component.literal("\n/voxyserver reload ").withStyle(ChatFormatting.YELLOW))
+                .append(Component.literal("- Reload voxyserver.json from disk & apply live").withStyle(ChatFormatting.GRAY));
+        out.append(Component.literal("\n/voxyserver config <list|get|set|reload> ").withStyle(ChatFormatting.YELLOW))
+                .append(Component.literal("- Manage all advanced configuration values").withStyle(ChatFormatting.GRAY));
+        out.append(Component.literal("\n/voxyserver stats [continuous|stop] ").withStyle(ChatFormatting.YELLOW))
+                .append(Component.literal("- Monitor streaming engine performance").withStyle(ChatFormatting.GRAY));
+        out.append(Component.literal("\n/voxyserver import existing ... ").withStyle(ChatFormatting.YELLOW))
+                .append(Component.literal("- Generate LODs for pre-existing worlds").withStyle(ChatFormatting.GRAY));
+
+        if (cfg != null) {
+            out.append(Component.literal("\n\nActive Status: ").withStyle(ChatFormatting.DARK_AQUA, ChatFormatting.BOLD))
+                    .append(kv("Radius", cfg.maxClientVoxyRadius + "c", ChatFormatting.WHITE)).append(sep())
+                    .append(kv("Bandwidth", cfg.maxBandwidthBytesPerSec == 0 ? "Unlimited" : (cfg.maxBandwidthBytesPerSec / 1024) + " KB/s", ChatFormatting.WHITE)).append(sep())
+                    .append(kv("Threads", cfg.workerThreads, ChatFormatting.WHITE)).append(sep())
+                    .append(kvc("HashSync", onOffComp(cfg.hashSyncEnabled))).append(sep())
+                    .append(kvc("Pacing", onOffComp(cfg.enableDistancePacing)));
+        }
+
+        source.sendSuccess(() -> out, false);
+        return 1;
+    }
+
+    private static int getRadius(CommandSourceStack source) {
+        VoxyServerConfig cfg = Voxyserver.getConfig();
+        if (cfg == null) {
+            source.sendFailure(Component.literal("config not loaded"));
+            return 0;
+        }
+        MutableComponent out = Component.literal("[VoxyServer] ").withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD)
+                .append(Component.literal("Max client LOD radius: ").withStyle(ChatFormatting.GRAY))
+                .append(Component.literal(cfg.maxClientVoxyRadius + " chunks (" + (cfg.maxClientVoxyRadius * 16) + " blocks)").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal(" [lodStreamRadius=" + cfg.lodStreamRadius + "]").withStyle(ChatFormatting.DARK_GRAY));
+        source.sendSuccess(() -> out, false);
+        return 1;
+    }
+
+    private static int setRadius(CommandSourceStack source, Voxyserver mod, int radius) {
+        VoxyServerConfig current = Voxyserver.getConfig();
+        if (current == null) {
+            source.sendFailure(Component.literal("config not loaded"));
+            return 0;
+        }
+        VoxyServerConfig candidate = current.copy();
+        candidate.maxClientVoxyRadius = radius;
+        candidate.lodStreamRadius = radius;
+        List<String> errors = candidate.validate();
+        if (!errors.isEmpty()) {
+            source.sendFailure(Component.literal("invalid: " + String.join("; ", errors)));
+            return 0;
+        }
+        List<String> notes = mod.applyConfigFromCommand(candidate);
+        MutableComponent ok = Component.literal("[VoxyServer] ").withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD)
+                .append(Component.literal("Max client LOD radius set to ").withStyle(ChatFormatting.GREEN))
+                .append(Component.literal(radius + " chunks (" + (radius * 16) + " blocks)").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal(" (broadcast to clients & saved)").withStyle(ChatFormatting.DARK_GREEN));
+        source.sendSuccess(() -> ok, true);
+        for (String note : notes) {
+            source.sendSuccess(() -> Component.literal("note: " + note).withStyle(ChatFormatting.YELLOW), false);
+        }
+        return 1;
+    }
+
+    private static int getBandwidth(CommandSourceStack source) {
+        VoxyServerConfig cfg = Voxyserver.getConfig();
+        if (cfg == null) {
+            source.sendFailure(Component.literal("config not loaded"));
+            return 0;
+        }
+        MutableComponent out = Component.literal("[VoxyServer] ").withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD)
+                .append(Component.literal("Per-player bandwidth limit: ").withStyle(ChatFormatting.GRAY))
+                .append(formatBandwidth(cfg.maxBandwidthBytesPerSec));
+        source.sendSuccess(() -> out, false);
+        return 1;
+    }
+
+    private static int setBandwidth(CommandSourceStack source, Voxyserver mod, int bytesPerSec) {
+        VoxyServerConfig current = Voxyserver.getConfig();
+        if (current == null) {
+            source.sendFailure(Component.literal("config not loaded"));
+            return 0;
+        }
+        VoxyServerConfig candidate = current.copy();
+        candidate.maxBandwidthBytesPerSec = bytesPerSec;
+        List<String> errors = candidate.validate();
+        if (!errors.isEmpty()) {
+            source.sendFailure(Component.literal("invalid: " + String.join("; ", errors)));
+            return 0;
+        }
+        List<String> notes = mod.applyConfigFromCommand(candidate);
+        MutableComponent ok = Component.literal("[VoxyServer] ").withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD)
+                .append(Component.literal("Per-player bandwidth limit set to ").withStyle(ChatFormatting.GREEN))
+                .append(formatBandwidth(bytesPerSec))
+                .append(Component.literal(" (applied live to active player buckets & saved)").withStyle(ChatFormatting.DARK_GREEN));
+        source.sendSuccess(() -> ok, true);
+        for (String note : notes) {
+            source.sendSuccess(() -> Component.literal("note: " + note).withStyle(ChatFormatting.YELLOW), false);
+        }
+        return 1;
+    }
+
+    private static MutableComponent formatBandwidth(int bytesPerSec) {
+        if (bytesPerSec <= 0) {
+            return Component.literal("Unlimited (throttling disabled)").withStyle(ChatFormatting.GREEN);
+        }
+        double kb = bytesPerSec / 1024.0;
+        String formatted = String.format("%,d B/s (~%.1f KB/s)", bytesPerSec, kb);
+        return Component.literal(formatted).withStyle(ChatFormatting.WHITE);
+    }
+
+    private static int getThreads(CommandSourceStack source) {
+        VoxyServerConfig cfg = Voxyserver.getConfig();
+        if (cfg == null) {
+            source.sendFailure(Component.literal("config not loaded"));
+            return 0;
+        }
+        MutableComponent out = Component.literal("[VoxyServer] ").withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD)
+                .append(Component.literal("LOD meshing worker threads: ").withStyle(ChatFormatting.GRAY))
+                .append(Component.literal(String.valueOf(cfg.workerThreads)).withStyle(ChatFormatting.WHITE));
+        source.sendSuccess(() -> out, false);
+        return 1;
+    }
+
+    private static int setThreads(CommandSourceStack source, Voxyserver mod, int count) {
+        VoxyServerConfig current = Voxyserver.getConfig();
+        if (current == null) {
+            source.sendFailure(Component.literal("config not loaded"));
+            return 0;
+        }
+        VoxyServerConfig candidate = current.copy();
+        candidate.workerThreads = count;
+        List<String> errors = candidate.validate();
+        if (!errors.isEmpty()) {
+            source.sendFailure(Component.literal("invalid: " + String.join("; ", errors)));
+            return 0;
+        }
+        List<String> notes = mod.applyConfigFromCommand(candidate);
+        MutableComponent ok = Component.literal("[VoxyServer] ").withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD)
+                .append(Component.literal("Worker threads set to ").withStyle(ChatFormatting.GREEN))
+                .append(Component.literal(String.valueOf(count)).withStyle(ChatFormatting.WHITE))
+                .append(Component.literal(" (applied live to engine & saved)").withStyle(ChatFormatting.DARK_GREEN));
+        source.sendSuccess(() -> ok, true);
+        for (String note : notes) {
+            source.sendSuccess(() -> Component.literal("note: " + note).withStyle(ChatFormatting.YELLOW), false);
+        }
+        return 1;
+    }
+
+    private static int getHashSync(CommandSourceStack source) {
+        VoxyServerConfig cfg = Voxyserver.getConfig();
+        if (cfg == null) {
+            source.sendFailure(Component.literal("config not loaded"));
+            return 0;
+        }
+        MutableComponent out = Component.literal("[VoxyServer] ").withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD)
+                .append(Component.literal("Hash synchronization: ").withStyle(ChatFormatting.GRAY))
+                .append(onOffComp(cfg.hashSyncEnabled));
+        source.sendSuccess(() -> out, false);
+        return 1;
+    }
+
+    private static int setHashSync(CommandSourceStack source, Voxyserver mod, boolean enabled) {
+        VoxyServerConfig current = Voxyserver.getConfig();
+        if (current == null) {
+            source.sendFailure(Component.literal("config not loaded"));
+            return 0;
+        }
+        VoxyServerConfig candidate = current.copy();
+        candidate.hashSyncEnabled = enabled;
+        List<String> notes = mod.applyConfigFromCommand(candidate);
+        MutableComponent ok = Component.literal("[VoxyServer] ").withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD)
+                .append(Component.literal("Hash synchronization set to ").withStyle(ChatFormatting.GREEN))
+                .append(onOffComp(enabled))
+                .append(Component.literal(" (broadcast to clients & saved)").withStyle(ChatFormatting.DARK_GREEN));
+        source.sendSuccess(() -> ok, true);
+        for (String note : notes) {
+            source.sendSuccess(() -> Component.literal("note: " + note).withStyle(ChatFormatting.YELLOW), false);
+        }
+        return 1;
+    }
+
+    private static int getPacing(CommandSourceStack source) {
+        VoxyServerConfig cfg = Voxyserver.getConfig();
+        if (cfg == null) {
+            source.sendFailure(Component.literal("config not loaded"));
+            return 0;
+        }
+        MutableComponent out = Component.literal("[VoxyServer] ").withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD)
+                .append(Component.literal("Distance pacing: ").withStyle(ChatFormatting.GRAY))
+                .append(onOffComp(cfg.enableDistancePacing));
+        source.sendSuccess(() -> out, false);
+        return 1;
+    }
+
+    private static int setPacing(CommandSourceStack source, Voxyserver mod, boolean enabled) {
+        VoxyServerConfig current = Voxyserver.getConfig();
+        if (current == null) {
+            source.sendFailure(Component.literal("config not loaded"));
+            return 0;
+        }
+        VoxyServerConfig candidate = current.copy();
+        candidate.enableDistancePacing = enabled;
+        List<String> notes = mod.applyConfigFromCommand(candidate);
+        MutableComponent ok = Component.literal("[VoxyServer] ").withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD)
+                .append(Component.literal("Distance pacing set to ").withStyle(ChatFormatting.GREEN))
+                .append(onOffComp(enabled))
+                .append(Component.literal(" (applied live & saved)").withStyle(ChatFormatting.DARK_GREEN));
+        source.sendSuccess(() -> ok, true);
+        for (String note : notes) {
+            source.sendSuccess(() -> Component.literal("note: " + note).withStyle(ChatFormatting.YELLOW), false);
+        }
+        return 1;
+    }
+
+    private static int getRegionHash(CommandSourceStack source) {
+        VoxyServerConfig cfg = Voxyserver.getConfig();
+        if (cfg == null) {
+            source.sendFailure(Component.literal("config not loaded"));
+            return 0;
+        }
+        MutableComponent out = Component.literal("[VoxyServer] ").withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD)
+                .append(Component.literal("Region hash synchronization: ").withStyle(ChatFormatting.GRAY))
+                .append(onOffComp(cfg.enableRegionHashSync));
+        source.sendSuccess(() -> out, false);
+        return 1;
+    }
+
+    private static int setRegionHash(CommandSourceStack source, Voxyserver mod, boolean enabled) {
+        VoxyServerConfig current = Voxyserver.getConfig();
+        if (current == null) {
+            source.sendFailure(Component.literal("config not loaded"));
+            return 0;
+        }
+        VoxyServerConfig candidate = current.copy();
+        candidate.enableRegionHashSync = enabled;
+        List<String> notes = mod.applyConfigFromCommand(candidate);
+        MutableComponent ok = Component.literal("[VoxyServer] ").withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD)
+                .append(Component.literal("Region hash synchronization set to ").withStyle(ChatFormatting.GREEN))
+                .append(onOffComp(enabled))
+                .append(Component.literal(" (applied live & saved)").withStyle(ChatFormatting.DARK_GREEN));
+        source.sendSuccess(() -> ok, true);
+        for (String note : notes) {
+            source.sendSuccess(() -> Component.literal("note: " + note).withStyle(ChatFormatting.YELLOW), false);
+        }
+        return 1;
+    }
+
+    private static int configReload(CommandSourceStack source, Voxyserver mod) {
+        List<String> notes = mod.reloadConfigFromCommand();
+        if (notes == null) {
+            source.sendFailure(Component.literal("[VoxyServer] Failed to reload configuration from disk (check server log for syntax or validation errors)"));
+            return 0;
+        }
+        MutableComponent ok = Component.literal("[VoxyServer] ").withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD)
+                .append(Component.literal("Configuration reloaded successfully from disk and applied live.").withStyle(ChatFormatting.GREEN));
         source.sendSuccess(() -> ok, true);
         for (String note : notes) {
             source.sendSuccess(() -> Component.literal("note: " + note).withStyle(ChatFormatting.YELLOW), false);

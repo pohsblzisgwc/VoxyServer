@@ -60,7 +60,7 @@ public class LodStreamingService {
     private static final long MANIFEST_TIMEOUT_TICKS = 60L;
     private static final long BATCH_ACK_TIMEOUT_TICKS = 600L;
 
-    private final VoxyServerConfig config;
+    private volatile VoxyServerConfig config;
     private final ServerLodEngine engine;
     private volatile int lodStreamRadius;
     private volatile int maxSectionsPerTick;
@@ -297,29 +297,48 @@ public class LodStreamingService {
         }
     }
 
-    public void updateConfig(int lodStreamRadius, int maxSectionsPerTick,
-                             int sectionsPerPacket, int tickInterval,
-                             int dirtyTrackingInterval, boolean hashSyncEnabled) {
-        boolean hashSyncChanged = this.hashSyncEnabled != hashSyncEnabled;
-        this.lodStreamRadius = lodStreamRadius;
-        this.maxSectionsPerTick = maxSectionsPerTick;
-        this.sectionsPerPacket = sectionsPerPacket;
-        this.tickInterval = tickInterval;
-        this.pendingDirtyTimeoutTicks = Math.max(dirtyTrackingInterval * 2L, 40L);
-        this.hashSyncEnabled = hashSyncEnabled;
+    public void updateConfig(VoxyServerConfig newConfig) {
+        boolean hashSyncChanged = this.hashSyncEnabled != newConfig.hashSyncEnabled;
+        this.config = newConfig;
+        this.lodStreamRadius = newConfig.lodStreamRadius;
+        this.maxSectionsPerTick = newConfig.maxSectionsPerTickPerPlayer;
+        this.sectionsPerPacket = newConfig.sectionsPerPacket;
+        this.tickInterval = newConfig.tickInterval;
+        this.pendingDirtyTimeoutTicks = Math.max(newConfig.dirtyTrackingInterval * 2L, 40L);
+        this.hashSyncEnabled = newConfig.hashSyncEnabled;
         if (!hashSyncEnabled) {
             pendingManifestBatches.clear();
         }
-        if (hashSyncChanged && server != null) {
+        BandwidthThrottler.INSTANCE.updateAllBandwidth(newConfig.maxBandwidthBytesPerSec);
+        if (server != null) {
             for (ServerPlayer player : server.getPlayerList().getPlayers()) {
                 PlayerLodTracker tracker = trackers.get(player.getUUID());
                 if (tracker == null || !tracker.isReady() || !tracker.isProtocolOk()) continue;
                 sendSettings(player);
-                sendNewSession(player, tracker, player.level().dimension().identifier());
+                if (hashSyncChanged) {
+                    sendNewSession(player, tracker, player.level().dimension().identifier());
+                }
             }
         }
+    }
+
+    public void updateConfig(int lodStreamRadius, int maxSectionsPerTick,
+                             int sectionsPerPacket, int tickInterval,
+                             int dirtyTrackingInterval, boolean hashSyncEnabled) {
+        if (this.config != null) {
+            this.config.lodStreamRadius = lodStreamRadius;
+            this.config.maxClientVoxyRadius = lodStreamRadius;
+            this.config.maxSectionsPerTickPerPlayer = maxSectionsPerTick;
+            this.config.sectionsPerPacket = sectionsPerPacket;
+            this.config.tickInterval = tickInterval;
+            this.config.dirtyTrackingInterval = dirtyTrackingInterval;
+            this.config.hashSyncEnabled = hashSyncEnabled;
+            updateConfig(this.config);
+        }
+    }
+
     private void sendSettings(ServerPlayer player) {
-        if (hashSyncEnabled && ServerPlayNetworking.canSend(player, LODHashSyncSettingsPayload.TYPE)) {
+        if (ServerPlayNetworking.canSend(player, LODHashSyncSettingsPayload.TYPE)) {
             ServerPlayNetworking.send(player, new LODHashSyncSettingsPayload(hashSyncEnabled));
         }
         if (ServerPlayNetworking.canSend(player, LODServerSettingsPayload.TYPE)) {

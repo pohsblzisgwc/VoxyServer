@@ -464,8 +464,11 @@ public class PlayerLodTracker {
         this.lodEnabled = enabled;
     }
 
-    public void setPreferredRadius(int radius) {
-        this.preferredRadius = radius;
+    public synchronized void setPreferredRadius(int radius) {
+        if (this.preferredRadius != radius) {
+            this.preferredRadius = radius;
+            resetScanStateLocked();
+        }
     }
 
     public void setPreferredMaxSections(int maxSections) {

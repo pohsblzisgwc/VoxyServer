@@ -78,6 +78,19 @@ public class Voxyserver implements ModInitializer {
         return notes;
     }
 
+    public List<String> reloadConfigFromCommand() {
+        VoxyServerConfig newConfig = VoxyServerConfig.reload();
+        if (newConfig == null) {
+            return null;
+        }
+        List<String> notes = applyConfigChanges(config, newConfig);
+        config = newConfig;
+        try {
+            lastConfigModified = Files.getLastModifiedTime(VoxyServerConfig.getConfigPath()).toMillis();
+        } catch (IOException ignored) {}
+        return notes;
+    }
+
     @Override
     public void onInitialize() {
         config = VoxyServerConfig.load();
@@ -201,14 +214,7 @@ public class Voxyserver implements ModInitializer {
         }
 
         if (streamingService != null) {
-            streamingService.updateConfig(
-                    newCfg.lodStreamRadius,
-                    newCfg.maxSectionsPerTickPerPlayer,
-                    newCfg.sectionsPerPacket,
-                    newCfg.tickInterval,
-                    newCfg.dirtyTrackingInterval,
-                    newCfg.hashSyncEnabled
-            );
+            streamingService.updateConfig(newCfg);
         }
 
         if (dirtyTracker != null) {

@@ -24,6 +24,7 @@ public class BandwidthThrottlerTest {
         testMultiPlayerIsolation();
         testPlayerOutboundQueuePriorityAndEviction();
         testQueueDimensionClear();
+        testRuntimeBandwidthUpdate();
         System.out.println("[PASS] BandwidthThrottlerTest completed successfully.\n");
     }
 
@@ -166,5 +167,41 @@ public class BandwidthThrottlerTest {
         assert queue.getQueuedPacketCount() == 1 : "Expected 1 packet remaining after dimension clear";
         assert queue.peekNext().dimension().equals(nether) : "Remaining packet must be nether";
         System.out.println("  ✓ testQueueDimensionClear");
+    }
+
+    private static void testRuntimeBandwidthUpdate() {
+        BandwidthThrottler throttler = new BandwidthThrottler();
+        UUID player1 = UUID.randomUUID();
+        UUID player2 = UUID.randomUUID();
+
+        // 1. Initial registration at 100 KB/s
+        throttler.registerPlayer(player1, 100_000);
+        throttler.registerPlayer(player2, 100_000);
+
+        BandwidthThrottler.TokenBucket b1 = throttler.getBucket(player1);
+        BandwidthThrottler.TokenBucket b2 = throttler.getBucket(player2);
+
+        assert b1.getBytesPerSecond() == 100_000 : "Initial bps must be 100_000";
+        assert !b1.isUnlimited() : "Bucket must not be unlimited";
+
+        // 2. Runtime update to 500 KB/s
+        throttler.updateAllBandwidth(500_000);
+        assert b1.getBytesPerSecond() == 500_000 : "b1 bps must be updated to 500_000";
+        assert b2.getBytesPerSecond() == 500_000 : "b2 bps must be updated to 500_000";
+        assert b1.getMaxBurst() == 1_000_000 : "maxBurst must be 1_000_000";
+
+        // 3. Runtime update to unlimited (0)
+        throttler.updateAllBandwidth(0);
+        assert b1.isUnlimited() : "b1 must be unlimited";
+        assert b2.isUnlimited() : "b2 must be unlimited";
+        assert b1.getAvailableTokens() == Long.MAX_VALUE : "Tokens must be MAX_VALUE when unlimited";
+
+        // 4. Runtime update back to throttled (200 KB/s)
+        throttler.updateAllBandwidth(200_000);
+        assert !b1.isUnlimited() : "b1 must be throttled again";
+        assert b1.getBytesPerSecond() == 200_000 : "b1 bps must be 200_000";
+        assert b1.getAvailableTokens() <= b1.getMaxBurst() : "Available tokens must be clamped to maxBurst";
+
+        System.out.println("  ✓ testRuntimeBandwidthUpdate");
     }
 }
