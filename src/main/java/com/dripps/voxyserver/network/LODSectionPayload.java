@@ -24,14 +24,24 @@ public record LODSectionPayload(
     public static final StreamCodec<RegistryFriendlyByteBuf, LODSectionPayload> CODEC =
             StreamCodec.of(LODSectionPayload::write, LODSectionPayload::read);
 
+    public LODSectionPayload {
+        if (dimension == null) {
+            throw new IllegalArgumentException("dimension cannot be null");
+        }
+        if (lutBlockStateIds == null || lutBiomeIds == null || lutLight == null || indexArray == null) {
+            throw new IllegalArgumentException("section array components cannot be null");
+        }
+        int lutLen = lutBlockStateIds.length;
+        if (lutLen < 1 || lutLen > LODBulkPayload.MAX_LUT_ENTRIES
+                || lutBiomeIds.length != lutLen || lutLight.length != lutLen
+                || indexArray.length < 1
+                || indexArray.length > LODBulkPayload.MAX_INDEX_ENTRIES) {
+            throw new IllegalArgumentException("invalid section data array sizes");
+        }
+    }
+
     private static void write(RegistryFriendlyByteBuf buf, LODSectionPayload payload) {
         int lutLen = payload.lutBlockStateIds.length;
-        if (lutLen < 1 || lutLen > LODBulkPayload.MAX_LUT_ENTRIES
-                || payload.lutBiomeIds.length != lutLen || payload.lutLight.length != lutLen
-                || payload.indexArray.length < 1
-                || payload.indexArray.length > LODBulkPayload.MAX_INDEX_ENTRIES) {
-            throw new IllegalArgumentException("invalid section data");
-        }
         buf.writeIdentifier(payload.dimension);
         buf.writeLong(payload.sectionKey);
         buf.writeLong(payload.contentHash);
@@ -69,6 +79,9 @@ public record LODSectionPayload(
         if (lutLen < 1 || lutLen > LODBulkPayload.MAX_LUT_ENTRIES) {
             throw new IllegalArgumentException("invalid lookup table size: " + lutLen);
         }
+        if ((long) lutLen * 3L > buf.readableBytes()) {
+            throw new IllegalArgumentException("truncated LUT in section payload: needed " + (lutLen * 3) + " bytes, but only " + buf.readableBytes() + " available");
+        }
         int[] blockStateIds = new int[lutLen];
         int[] biomeIds = new int[lutLen];
         byte[] light = new byte[lutLen];
@@ -85,6 +98,10 @@ public record LODSectionPayload(
             throw new IllegalArgumentException("invalid packed lod index data");
         }
         int entriesPerLong = 64 / bitsPerEntry;
+        int longCount = (indexLen + entriesPerLong - 1) / entriesPerLong;
+        if ((long) longCount * 8L > buf.readableBytes()) {
+            throw new IllegalArgumentException("truncated index data in section payload: needed " + (longCount * 8) + " bytes, but only " + buf.readableBytes() + " available");
+        }
         long mask = (1L << bitsPerEntry) - 1;
         short[] indexArray = new short[indexLen];
         int idx = 0;

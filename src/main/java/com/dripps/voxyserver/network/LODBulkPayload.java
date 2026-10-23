@@ -24,6 +24,15 @@ public record LODBulkPayload(
     public static final StreamCodec<RegistryFriendlyByteBuf, LODBulkPayload> CODEC =
             StreamCodec.of(LODBulkPayload::write, LODBulkPayload::read);
 
+    public LODBulkPayload {
+        if (dimension == null) {
+            throw new IllegalArgumentException("dimension cannot be null");
+        }
+        if (sections == null || sections.isEmpty() || sections.size() > MAX_SECTIONS) {
+            throw new IllegalArgumentException("invalid bulk section count: " + (sections == null ? 0 : sections.size()));
+        }
+    }
+
     private static void write(RegistryFriendlyByteBuf buf, LODBulkPayload payload) {
         if (payload.sections.isEmpty() || payload.sections.size() > MAX_SECTIONS) {
             throw new IllegalArgumentException("invalid bulk section count");
@@ -66,6 +75,9 @@ public record LODBulkPayload(
         if (count < 1 || count > MAX_SECTIONS) {
             throw new IllegalArgumentException("invalid bulk section count: " + count);
         }
+        if (buf.readableBytes() < count * 27) {
+            throw new IllegalArgumentException("truncated bulk payload: needed at least " + (count * 27) + " bytes, but only " + buf.readableBytes() + " available");
+        }
         List<LODSectionPayload> sections = new ArrayList<>(count);
         for (int s = 0; s < count; s++) {
             long sectionKey = buf.readLong();
@@ -73,6 +85,9 @@ public record LODBulkPayload(
             int lutLen = buf.readVarInt();
             if (lutLen < 1 || lutLen > MAX_LUT_ENTRIES) {
                 throw new IllegalArgumentException("invalid lookup table size: " + lutLen);
+            }
+            if ((long) lutLen * 3L > buf.readableBytes()) {
+                throw new IllegalArgumentException("truncated LUT entries in bulk payload");
             }
             int[] blockStateIds = new int[lutLen];
             int[] biomeIds = new int[lutLen];
@@ -89,6 +104,10 @@ public record LODBulkPayload(
                 throw new IllegalArgumentException("invalid packed lod index data");
             }
             int entriesPerLong = 64 / bitsPerEntry;
+            int longCount = (indexLen + entriesPerLong - 1) / entriesPerLong;
+            if ((long) longCount * 8L > buf.readableBytes()) {
+                throw new IllegalArgumentException("truncated index data in bulk payload");
+            }
             long mask = (1L << bitsPerEntry) - 1;
             short[] indexArray = new short[indexLen];
             int idx = 0;

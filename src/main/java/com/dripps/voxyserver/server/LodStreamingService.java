@@ -14,6 +14,11 @@ import com.dripps.voxyserver.network.LODServerSettingsPayload;
 import com.dripps.voxyserver.network.LODStreamSessionPayload;
 import com.dripps.voxyserver.network.PreSerializedLodPayload;
 import com.dripps.voxyserver.network.VoxyServerNetworking;
+import com.dripps.voxyserver.config.VoxyServerConfig;
+import com.dripps.voxyserver.network.LODRegionSyncPayload;
+import com.dripps.voxyserver.server.hash.RegionHashManager;
+import com.dripps.voxyserver.server.throttle.BandwidthThrottler;
+import com.dripps.voxyserver.server.throttle.PlayerOutboundQueue;
 import com.dripps.voxyserver.util.IdRemapper;
 import it.unimi.dsi.fastutil.longs.Long2ShortOpenHashMap;
 import me.cortex.voxy.common.world.WorldEngine;
@@ -55,6 +60,7 @@ public class LodStreamingService {
     private static final long MANIFEST_TIMEOUT_TICKS = 60L;
     private static final long BATCH_ACK_TIMEOUT_TICKS = 600L;
 
+    private final VoxyServerConfig config;
     private final ServerLodEngine engine;
     private volatile int lodStreamRadius;
     private volatile int maxSectionsPerTick;
@@ -142,7 +148,8 @@ public class LodStreamingService {
                         .withStyle(ChatFormatting.RED));
     }
 
-    public LodStreamingService(ServerLodEngine engine, com.dripps.voxyserver.config.VoxyServerConfig config) {
+    public LodStreamingService(ServerLodEngine engine, VoxyServerConfig config) {
+        this.config = config;
         this.engine = engine;
         this.lodStreamRadius = config.lodStreamRadius;
         this.maxSectionsPerTick = config.maxSectionsPerTickPerPlayer;
@@ -157,11 +164,19 @@ public class LodStreamingService {
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
             var tracker = new PlayerLodTracker();
             trackers.put(handler.getPlayer().getUUID(), tracker);
+            BandwidthThrottler.INSTANCE.registerPlayer(
+                    handler.getPlayer().getUUID(), config.maxBandwidthBytesPerSec);
         });
 
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
             UUID playerId = handler.getPlayer().getUUID();
-            trackers.remove(playerId);
+            var tracker = trackers.remove(playerId);
+            List<PlayerOutboundQueue.QueuedPacket> dropped = BandwidthThrottler.INSTANCE.unregisterPlayer(playerId);
+            if (tracker != null) {
+                for (PlayerOutboundQueue.QueuedPacket pkt : dropped) {
+                    tracker.completeBatch(pkt.streamEpoch(), pkt.batchId(), false, currentTick);
+                }
+            }
         });
 
         ServerPlayNetworking.registerGlobalReceiver(LODHandshakePayload.TYPE, (payload, context) -> {
@@ -234,6 +249,16 @@ public class LodStreamingService {
             Voxyserver.LOGGER.info("player {} updated LOD preferences: enabled={}, radius={}, maxSections={}",
                     context.player().getName().getString(), payload.enabled(),
                     payload.lodStreamRadius(), payload.maxSectionsPerTick());
+        });
+
+        ServerPlayNetworking.registerGlobalReceiver(LODRegionSyncPayload.TYPE, (payload, context) -> {
+            if (!config.enableRegionHashSync) return;
+            var tracker = trackers.get(context.player().getUUID());
+            if (tracker != null) {
+                tracker.updateClientRegionHashes(payload.regionKeys(), payload.regionHashes());
+                Voxyserver.LOGGER.debug("player {} synchronized {} cached region hashes",
+                        context.player().getName().getString(), payload.regionKeys().length);
+            }
         });
 
         ServerTickEvents.END_SERVER_TICK.register(this::onServerTick);
@@ -362,12 +387,49 @@ public class LodStreamingService {
                                    int minY, int maxY,
                                    Registry<Biome> biomeRegistry) {}
 
+    private void drainPlayerOutbound(ServerPlayer player, PlayerLodTracker tracker) {
+        if (player == null || tracker == null) return;
+        UUID uuid = player.getUUID();
+        Identifier currentDim = player.level().dimension().identifier();
+
+        while (true) {
+            PlayerOutboundQueue.QueuedPacket pkt = BandwidthThrottler.INSTANCE.peekPendingPacket(uuid);
+            if (pkt == null) break;
+
+            if (!currentDim.equals(pkt.dimension()) || !tracker.isCurrentDelivery(pkt.dimension(), pkt.streamEpoch())) {
+                PlayerOutboundQueue.QueuedPacket polled = BandwidthThrottler.INSTANCE.pollPendingPacket(uuid);
+                if (polled != null) {
+                    tracker.completeBatch(polled.streamEpoch(), polled.batchId(), false, currentTick);
+                }
+                continue;
+            }
+
+            int size = pkt.byteSize();
+            if (!BandwidthThrottler.INSTANCE.canSend(uuid, size)) {
+                break;
+            }
+
+            PlayerOutboundQueue.QueuedPacket polled = BandwidthThrottler.INSTANCE.pollPendingPacket(uuid);
+            if (polled != null) {
+                ServerPlayNetworking.send(player, polled.payload());
+            }
+        }
+    }
+
     private void onServerTick(MinecraftServer server) {
         this.server = server;
         currentTick++;
         flushReadyInitialLoadSections();
         expirePendingDirtySections();
         checkStreamWorkerHealth();
+
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            BandwidthThrottler.INSTANCE.tick(player.getUUID(), currentTick);
+            var tracker = trackers.get(player.getUUID());
+            if (tracker != null) {
+                drainPlayerOutbound(player, tracker);
+            }
+        }
 
         if (++tickCounter < tickInterval) return;
         tickCounter = 0;
@@ -441,6 +503,10 @@ public class LodStreamingService {
 
         tracker.resetScanState();
         Identifier dim = newLevel.dimension().identifier();
+        List<PlayerOutboundQueue.QueuedPacket> cleared = BandwidthThrottler.INSTANCE.clearDimension(player.getUUID(), dim);
+        for (PlayerOutboundQueue.QueuedPacket pkt : cleared) {
+            tracker.completeBatch(pkt.streamEpoch(), pkt.batchId(), false, currentTick);
+        }
         ServerPlayNetworking.send(player, LODClearPayload.clearDimension(dim));
         if (tracker.isProtocolOk()) {
             sendNewSession(player, tracker, dim);
@@ -449,6 +515,7 @@ public class LodStreamingService {
 
     public void clearDimensionForReadyPlayers(ServerLevel level) {
         Identifier dim = level.dimension().identifier();
+        RegionHashManager.INSTANCE.clearDimension(dim);
         for (var entry : trackers.entrySet()) {
             PlayerLodTracker tracker = entry.getValue();
             if (tracker == null || !tracker.isReady()) continue;
@@ -456,6 +523,10 @@ public class LodStreamingService {
             ServerPlayer player = level.getServer().getPlayerList().getPlayer(entry.getKey());
             if (player == null || player.level() != level) continue;
 
+            List<PlayerOutboundQueue.QueuedPacket> cleared = BandwidthThrottler.INSTANCE.clearDimension(entry.getKey(), dim);
+            for (PlayerOutboundQueue.QueuedPacket pkt : cleared) {
+                tracker.completeBatch(pkt.streamEpoch(), pkt.batchId(), false, currentTick);
+            }
             tracker.reset();
             ServerPlayNetworking.send(player, LODClearPayload.clearDimension(dim));
             if (tracker.isProtocolOk()) {
@@ -517,6 +588,10 @@ public class LodStreamingService {
             lastStreamHeartbeat = System.nanoTime();
 
             long key = tracker.pollDeferredDirtySection();
+            boolean isDirtySection = (key != PlayerLodTracker.NO_SECTION_KEY);
+            if (!isDirtySection) {
+                key = tracker.pollDeferredPacedSection();
+            }
             if (key == PlayerLodTracker.NO_SECTION_KEY) {
                 key = tracker.nextSectionKeyToScan(currentTick, IDLE_SCAN_RESTART_TICKS);
             }
@@ -533,6 +608,26 @@ public class LodStreamingService {
             if (isSectionPendingDirty(dimOrd, key)) {
                 pendingKeys.add(key);
                 continue;
+            }
+
+            // Region hash deduplication (if enabled)
+            if (config.enableRegionHashSync) {
+                long regKey = RegionHashManager.getRegionKeyForSection(key);
+                long serverHash = RegionHashManager.INSTANCE.getRegionHash(snap.dimension, regKey);
+                if (tracker.isRegionSynced(regKey, serverHash)) {
+                    continue;
+                }
+            }
+
+            // Distance-based pacing check: smooth out network load by pacing mid/far distance
+            if (!isDirtySection) {
+                int secX = WorldEngine.getX(key);
+                int secZ = WorldEngine.getZ(key);
+                int distSec = Math.max(Math.abs(secX - playerWorldSecX), Math.abs(secZ - playerWorldSecZ));
+                if (!BandwidthThrottler.INSTANCE.checkDistancePacing(distSec, candidates, config.enableDistancePacing)) {
+                    tracker.deferPacedSection(composite, key);
+                    continue;
+                }
             }
 
             // we cn js skip without acquiring when the cached hash is current and the client already has it
@@ -597,7 +692,23 @@ public class LodStreamingService {
                     tracker.resetScanState();
                     break;
                 }
-                packets.add(encoded.withDelivery(delivery.streamEpoch(), delivery.batchId()));
+                PreSerializedLodPayload packet = encoded.withDelivery(delivery.streamEpoch(), delivery.batchId());
+                PlayerOutboundQueue.QueuedPacket queuedPacket = new PlayerOutboundQueue.QueuedPacket(
+                        packet, dim, delivery.streamEpoch(), delivery.batchId(), false, System.nanoTime());
+                List<PlayerOutboundQueue.QueuedPacket> evicted = new ArrayList<>();
+                boolean enqueued = BandwidthThrottler.INSTANCE.enqueuePacket(playerId, queuedPacket, evicted);
+                for (PlayerOutboundQueue.QueuedPacket ev : evicted) {
+                    tracker.completeBatch(ev.streamEpoch(), ev.batchId(), false, currentTick);
+                }
+                if (!enqueued) {
+                    tracker.completeBatch(delivery.streamEpoch(), delivery.batchId(), false, currentTick);
+                    for (int j = i; j < Math.min(toSend.size(), i + packetSections); j++) {
+                        long retryKey = toSend.get(j).sectionKey();
+                        tracker.deferDirtySection(composeSectionKey(dimOrd, retryKey), retryKey);
+                    }
+                    break;
+                }
+                packets.add(packet);
             }
             List<PreSerializedLodPayload> preEncoded = List.copyOf(packets);
 
@@ -609,14 +720,7 @@ public class LodStreamingService {
 
             server.execute(() -> {
                 ServerPlayer player = server.getPlayerList().getPlayer(playerId);
-                for (PreSerializedLodPayload pkt : preEncoded) {
-                    if (player != null && player.level().dimension().identifier().equals(dim)
-                            && tracker.isCurrentDelivery(dim, pkt.streamEpoch())) {
-                        ServerPlayNetworking.send(player, pkt);
-                    } else {
-                        tracker.completeBatch(pkt.streamEpoch(), pkt.batchId(), false, currentTick);
-                    }
-                }
+                drainPlayerOutbound(player, tracker);
             });
         }
     }
@@ -624,6 +728,7 @@ public class LodStreamingService {
     private LODSectionPayload serializeSection(WorldSection section, Identifier dimension,
                                                 Mapper mapper, Registry<Biome> biomeRegistry) {
         long[] data = section.copyData();
+        RegionHashManager.INSTANCE.updateSectionHash(dimension, section.key, data);
 
         // build LUT of unique mapping ids
         Long2ShortOpenHashMap lutMap = new Long2ShortOpenHashMap();
@@ -723,6 +828,7 @@ public class LodStreamingService {
             return;
         }
 
+        RegionHashManager.INSTANCE.invalidateSection(dimension, sectionKey);
         long compositeKey = composeSectionKey(dimOrdinals.getOrdinal(dimension), sectionKey);
         hashCacheByKey.remove(compositeKey);
         if (!pendingDirtySections.containsKey(compositeKey)) {

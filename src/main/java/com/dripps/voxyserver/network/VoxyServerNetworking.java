@@ -20,5 +20,6 @@ public class VoxyServerNetworking {
         PayloadTypeRegistry.serverboundPlay().register(LODManifestPayload.TYPE, LODManifestPayload.CODEC);
         PayloadTypeRegistry.serverboundPlay().register(LODHandshakePayload.TYPE, LODHandshakePayload.CODEC);
         PayloadTypeRegistry.serverboundPlay().register(LODBatchResultPayload.TYPE, LODBatchResultPayload.CODEC);
+        PayloadTypeRegistry.serverboundPlay().register(LODRegionSyncPayload.TYPE, LODRegionSyncPayload.CODEC);
     }
 }

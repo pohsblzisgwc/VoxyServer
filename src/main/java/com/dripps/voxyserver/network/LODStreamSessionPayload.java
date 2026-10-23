@@ -15,6 +15,16 @@ public record LODStreamSessionPayload(Identifier dimension, long streamEpoch,
     public static final StreamCodec<RegistryFriendlyByteBuf, LODStreamSessionPayload> CODEC =
             StreamCodec.of(LODStreamSessionPayload::write, LODStreamSessionPayload::read);
 
+    public LODStreamSessionPayload {
+        if (dimension == null) {
+            throw new IllegalArgumentException("dimension cannot be null");
+        }
+        if (streamEpoch < 0L || manifestRequestId < 0L) {
+            throw new IllegalArgumentException("invalid LOD stream session: epoch=" + streamEpoch
+                    + ", manifestRequestId=" + manifestRequestId);
+        }
+    }
+
     private static void write(RegistryFriendlyByteBuf buf, LODStreamSessionPayload payload) {
         buf.writeIdentifier(payload.dimension);
         buf.writeVarLong(payload.streamEpoch);

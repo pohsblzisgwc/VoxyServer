@@ -21,6 +21,13 @@ public record PreSerializedLodPayload(long streamEpoch, long batchId, int sectio
     public static final StreamCodec<RegistryFriendlyByteBuf, PreSerializedLodPayload> CODEC =
             StreamCodec.of(PreSerializedLodPayload::write, PreSerializedLodPayload::read);
 
+    public PreSerializedLodPayload {
+        if (data == null) {
+            throw new IllegalArgumentException("data cannot be null");
+        }
+        validate(streamEpoch, batchId, sectionCount, data.length);
+    }
+
     private static void write(RegistryFriendlyByteBuf buf, PreSerializedLodPayload payload) {
         validate(payload.streamEpoch, payload.batchId, payload.sectionCount, payload.data.length);
         buf.writeVarLong(payload.streamEpoch);
@@ -66,7 +73,6 @@ public record PreSerializedLodPayload(long streamEpoch, long batchId, int sectio
         return new PreSerializedLodPayload(streamEpoch, batchId, this.sectionCount, this.data);
     }
 
-
     public LODBulkPayload decodeBulk(RegistryAccess registryAccess) {
         var raw = Unpooled.wrappedBuffer(data);
         try {
@@ -88,7 +94,7 @@ public record PreSerializedLodPayload(long streamEpoch, long batchId, int sectio
 
     private static void validate(long streamEpoch, long batchId, int sectionCount, int dataLength) {
         if (streamEpoch < 0L || batchId < 0L) {
-            throw new IllegalArgumentException("invalid delivery identitt");
+            throw new IllegalArgumentException("invalid delivery identity");
         }
         if (sectionCount < 1 || sectionCount > MAX_SECTIONS) {
             throw new IllegalArgumentException("invalid section count: " + sectionCount);

@@ -27,6 +27,9 @@ public class VoxyServerConfig {
     public boolean debugTrackingEnabled = false;
     public int debugTrackingInterval = 200;
     public boolean hashSyncEnabled = true;
+    public int maxBandwidthBytesPerSec = 250_000;
+    public boolean enableDistancePacing = true;
+    public boolean enableRegionHashSync = false;
 
     public static Path getConfigPath() {
         return FabricLoader.getInstance().getConfigDir().resolve(FILE_NAME);
@@ -41,6 +44,7 @@ public class VoxyServerConfig {
         if (workerThreads < 1 || workerThreads > 32) errors.add("workerthreads must be between 1 and 32, got " + workerThreads);
         if (dirtyTrackingInterval < 1) errors.add("dirtytrackinginterval must be at least 1, got " + dirtyTrackingInterval);
         if (debugTrackingInterval < 1) errors.add("debugtrackinginterval must be at least 1, got " + debugTrackingInterval);
+        if (maxBandwidthBytesPerSec < 0) errors.add("maxbandwidthbytespersec cannot be negative, got " + maxBandwidthBytesPerSec);
         return errors;
     }
 

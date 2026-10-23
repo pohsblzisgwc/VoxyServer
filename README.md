@@ -2,7 +2,7 @@
 
 a fabric server side mod that voxelizes chunks into LODs using [voxy](https://github.com/MCRcortex/voxy) and streams them to connected clients. players with voxy installed will receive LOD data from the server automatically, no client side world scanning/loading needed.
 
-**Latest: minecraft 26.2 | fabric**
+**Latest: minecraft 26.3 | fabric**
 
 ## how it works
 
@@ -17,6 +17,8 @@ players without voxy are unaffected.
 ## building
 
 due to voxy's license, the source and binary can't be included in this repo. you'll need to clone and build it yourself.
+
+`build.gradle` automatically matches any jar placed in the `libs/` folder (`libs/*.jar`), such as `libs/voxy-26.3.jar` or `libs/voxy.jar`.
 
 ### unix
 
@@ -34,8 +36,8 @@ due to voxy's license, the source and binary can't be included in this repo. you
 3. go back to the project root, make the `libs` directory, and copy the built jar:
    ```bash
    cd ..
-   mkdir libs
-   cp voxy/build/libs/voxy-*.jar libs/voxy.jar
+   mkdir -p libs
+   cp voxy/build/libs/voxy-*.jar libs/voxy-26.3.jar
    ```
 
 4. build voxyserver:
@@ -66,7 +68,7 @@ the output jar will be in `build/libs/`.
    ```cmd
    cd ..
    mkdir libs
-   for %f in (voxy\build\libs\voxy-*.jar) do copy "%f" libs\voxy.jar
+   for %f in (voxy\build\libs\voxy-*.jar) do copy "%f" libs\voxy-26.3.jar
    ```
 
 4. build voxyserver:
@@ -89,8 +91,11 @@ config file is generated at `config/voxyserver.json` on first run.
 | option | default | description |
 |--------|---------|-------------|
 | `lodStreamRadius` | `256` | radius in chunks to stream LODs around each player |
-| `maxSectionsPerTickPerPlayer` | `10` | max LOD sections sent per player per tick cycle |
+| `maxSectionsPerTickPerPlayer` | `100` | max LOD sections sent per player per tick cycle |
 | `sectionsPerPacket` | `50` | max LOD sections bundled into a single network packet |
+| `maxBandwidthBytesPerSec` | `250000` | token-bucket egress rate limit in bytes/sec per player (`0` = unlimited) |
+| `enableDistancePacing` | `true` | paces candidate selection by distance to prevent bandwidth spikes |
+| `enableRegionHashSync` | `false` | opportunistic 64-bit region hash deduplication |
 | `tickInterval` | `5` | server ticks between each streaming cycle |
 | `workerThreads` | `3` | number of worker threads for voxy to use |
 | `generateOnChunkLoad` | `true` | voxelize chunks as they load on the server |
@@ -106,6 +111,9 @@ config file is generated at `config/voxyserver.json` on first run.
   "lodStreamRadius": 256,
   "maxSectionsPerTickPerPlayer": 100,
   "sectionsPerPacket": 50,
+  "maxBandwidthBytesPerSec": 250000,
+  "enableDistancePacing": true,
+  "enableRegionHashSync": false,
   "generateOnChunkLoad": true,
   "tickInterval": 5,
   "workerThreads": 3,
@@ -116,7 +124,16 @@ config file is generated at `config/voxyserver.json` on first run.
 }
 ```
 
-higher `lodStreamRadius` means more LOD coverage but more storage and bandwidth. `maxSectionsPerTickPerPlayer` controls how fast LODs are sent to new players or when moving into unexplored areas. `sectionsPerPacket` controls how many sections are packed into each network packet (higher = fewer packets but larger each). lower `tickInterval` = more frequent streaming checks.
+higher `lodStreamRadius` means more LOD coverage but more storage and bandwidth. `maxSectionsPerTickPerPlayer` controls how fast LODs are sent to new players or when moving into unexplored areas. `maxBandwidthBytesPerSec` strictly shapes network egress using a token bucket filter. `sectionsPerPacket` controls how many sections are packed into each network packet.
+
+### distance-based pacing
+
+when `enableDistancePacing` is enabled, candidate sections are paced by distance:
+- **Near (<= 16 sections)**: 100% transmission rate for immediate close-range visual fidelity.
+- **Mid-Distance (17 ~ 48 sections)**: 50% trickle rate.
+- **Far-Distance (> 48 sections)**: 25% trickle rate.
+
+Paced candidates are deferred into a recovery queue rather than dropped, guaranteeing complete eventual delivery without candidate starvation.
 
 ### client config
 

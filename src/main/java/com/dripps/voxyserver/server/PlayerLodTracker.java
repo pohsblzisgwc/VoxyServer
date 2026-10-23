@@ -19,6 +19,8 @@ public class PlayerLodTracker {
     private final Long2LongOpenHashMap sectionOwners = new Long2LongOpenHashMap();
     private final Map<Long, OutstandingBatch> outstandingBatches = new HashMap<>();
     private final Map<Long, Long> deferredDirtySections = new LinkedHashMap<>();
+    private final Map<Long, Long> deferredPacedSections = new LinkedHashMap<>();
+    private final Long2LongOpenHashMap clientRegionHashes = new Long2LongOpenHashMap();
     private int manifestCenterX;
     private int manifestCenterZ;
     private int manifestRadius = -1;
@@ -65,6 +67,7 @@ public class PlayerLodTracker {
     public PlayerLodTracker() {
         this.acknowledgedSectionHashes.defaultReturnValue(0L);
         this.sectionOwners.defaultReturnValue(0L);
+        this.clientRegionHashes.defaultReturnValue(0L);
     }
 
     public boolean isReady() {
@@ -172,6 +175,47 @@ public class PlayerLodTracker {
         return !deferredDirtySections.isEmpty();
     }
 
+    public synchronized void deferPacedSection(long compositeKey, long sectionKey) {
+        if (deferredPacedSections.size() < 4096 || deferredPacedSections.containsKey(compositeKey)) {
+            deferredPacedSections.put(compositeKey, sectionKey);
+        }
+    }
+
+    public synchronized long pollDeferredPacedSection() {
+        var iterator = deferredPacedSections.entrySet().iterator();
+        while (iterator.hasNext()) {
+            var entry = iterator.next();
+            if (sectionOwners.containsKey(entry.getKey())) continue;
+            long key = entry.getValue();
+            iterator.remove();
+            return key;
+        }
+        return NO_SECTION_KEY;
+    }
+
+    public synchronized boolean hasDeferredPacedSections() {
+        return !deferredPacedSections.isEmpty();
+    }
+
+    public synchronized void updateClientRegionHashes(long[] keys, long[] hashes) {
+        if (keys == null || hashes == null) return;
+        int count = Math.min(keys.length, hashes.length);
+        for (int i = 0; i < count; i++) {
+            if (clientRegionHashes.size() < 16384 || clientRegionHashes.containsKey(keys[i])) {
+                clientRegionHashes.put(keys[i], hashes[i]);
+            }
+        }
+    }
+
+    public synchronized boolean isRegionSynced(long regionKey, long serverHash) {
+        if (serverHash == 0L || !clientRegionHashes.containsKey(regionKey)) return false;
+        return clientRegionHashes.get(regionKey) == serverHash;
+    }
+
+    public synchronized void clearRegionHashes() {
+        clientRegionHashes.clear();
+    }
+
     public synchronized Delivery reserveBatch(Identifier dimension, long expectedEpoch,
                                               long[] sectionKeys, long[] hashes, int bytes, long tick) {
         if (!dimension.equals(activeDimension) || expectedEpoch != streamEpoch) return null;
@@ -252,6 +296,7 @@ public class PlayerLodTracker {
 
     public synchronized void reset() {
         acknowledgedSectionHashes.clear();
+        clientRegionHashes.clear();
         clearOutstandingLocked();
         awaitingManifestDim = null;
         retryNotBeforeTick = 0L;
@@ -441,6 +486,7 @@ public class PlayerLodTracker {
         scanGeometryInitialized = false;
         scanExhausted = false;
         nextFullRescanTick = 0L;
+        deferredPacedSections.clear();
         resetScanCursorLocked();
     }
 

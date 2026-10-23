@@ -27,10 +27,26 @@ public record LODManifestPayload(
     public static final StreamCodec<RegistryFriendlyByteBuf, LODManifestPayload> CODEC =
             StreamCodec.of(LODManifestPayload::write, LODManifestPayload::read);
 
-    private static void write(RegistryFriendlyByteBuf buf, LODManifestPayload payload) {
-        if (payload.keys.length != payload.hashes.length || payload.keys.length > MAX_ENTRIES) {
-            throw new IllegalArgumentException("invalid manifest payload size");
+    public LODManifestPayload {
+        if (dimension == null) {
+            throw new IllegalArgumentException("dimension cannot be null");
         }
+        if (keys == null || hashes == null) {
+            throw new IllegalArgumentException("keys and hashes cannot be null");
+        }
+        if (keys.length != hashes.length) {
+            throw new IllegalArgumentException("keys and hashes length mismatch: " + keys.length + " vs " + hashes.length);
+        }
+        if (keys.length > MAX_ENTRIES) {
+            throw new IllegalArgumentException("keys length exceeds maximum: " + keys.length + " > " + MAX_ENTRIES);
+        }
+        if (streamEpoch < 0L || requestId < 0L || status < PART || status > CANCELED) {
+            throw new IllegalArgumentException("invalid manifest metadata: streamEpoch=" + streamEpoch
+                    + ", requestId=" + requestId + ", status=" + status);
+        }
+    }
+
+    private static void write(RegistryFriendlyByteBuf buf, LODManifestPayload payload) {
         buf.writeIdentifier(payload.dimension);
         buf.writeVarLong(payload.streamEpoch);
         buf.writeVarLong(payload.requestId);
@@ -52,6 +68,11 @@ public record LODManifestPayload(
         if (streamEpoch < 0L || requestId < 0L || status < PART || status > CANCELED
                 || count < 0 || count > MAX_ENTRIES) {
             throw new IllegalArgumentException("invalid manifest payload size: " + count);
+        }
+        long requiredBytes = (long) count * 16L;
+        if ((long) buf.readableBytes() < requiredBytes) {
+            throw new IllegalArgumentException("Manifest payload truncated: declared " + count
+                    + " entries (" + requiredBytes + " bytes), but only " + buf.readableBytes() + " bytes available");
         }
         long[] keys = new long[count];
         long[] hashes = new long[count];

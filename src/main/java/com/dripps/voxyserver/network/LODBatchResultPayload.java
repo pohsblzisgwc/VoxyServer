@@ -17,6 +17,10 @@ public record LODBatchResultPayload(long streamEpoch, long batchId, int status) 
     public static final StreamCodec<RegistryFriendlyByteBuf, LODBatchResultPayload> CODEC =
             StreamCodec.of(LODBatchResultPayload::write, LODBatchResultPayload::read);
 
+    public LODBatchResultPayload {
+        validate(streamEpoch, batchId, status);
+    }
+
     private static void write(RegistryFriendlyByteBuf buf, LODBatchResultPayload payload) {
         validate(payload.streamEpoch, payload.batchId, payload.status);
         buf.writeVarLong(payload.streamEpoch);
@@ -34,7 +38,8 @@ public record LODBatchResultPayload(long streamEpoch, long batchId, int status) 
 
     private static void validate(long streamEpoch, long batchId, int status) {
         if (streamEpoch < 0L || batchId < 0L || status < SUCCESS || status > STALE) {
-            throw new IllegalArgumentException("invalid LOD batch result");
+            throw new IllegalArgumentException("invalid LOD batch result: epoch=" + streamEpoch
+                    + ", batchId=" + batchId + ", status=" + status);
         }
     }
 
