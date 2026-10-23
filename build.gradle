@@ -138,6 +138,20 @@ jar {
     }
 }
 
+test {
+    failOnNoDiscoveredTests = false
+    filter {
+        failOnNoMatchingTests = false
+    }
+    doLast {
+        project.javaexec {
+            mainClass = "com.dripps.voxyserver.TestRunner"
+            classpath = sourceSets.test.runtimeClasspath
+            enableAssertions = true
+        }
+    }
+}
+
 // configure the maven publication
 publishing {
     publications {
