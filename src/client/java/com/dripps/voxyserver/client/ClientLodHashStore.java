@@ -27,6 +27,8 @@ import java.util.function.BooleanSupplier;
 
 public final class ClientLodHashStore {
     private static final ClientLodHashStore INSTANCE = new ClientLodHashStore();
+    private static final int MAGIC = 0x56534833;
+    private static final int VERSION = com.dripps.voxyserver.util.SemanticSectionHash.VERSION;
     private static final int MAX_LOADED_WORLDS = 2;
     private static final int MAX_FILE_ENTRIES = 16_777_216;
     private static final int MAX_PENDING_ENTRIES = 131_072;
@@ -163,6 +165,8 @@ public final class ClientLodHashStore {
         try {
             Files.createDirectories(file.getParent());
             try (DataOutputStream out = new DataOutputStream(new BufferedOutputStream(Files.newOutputStream(temporary)))) {
+                out.writeInt(MAGIC);
+                out.writeInt(VERSION);
                 out.writeInt(state.hashes.size());
                 for (var entry : state.hashes.long2LongEntrySet()) {
                     out.writeLong(entry.getLongKey());
@@ -187,12 +191,13 @@ public final class ClientLodHashStore {
         if (!Files.exists(file)) return result;
         try {
             long length = Files.size(file);
-            if (length < Integer.BYTES || (length - Integer.BYTES) % (Long.BYTES * 2L) != 0L) {
+            if (length < 12 || (length - 12) % 16 != 0L) {
                 throw new IOException("invalid hash sidecar length");
             }
             try (DataInputStream in = new DataInputStream(new BufferedInputStream(Files.newInputStream(file)))) {
+                if (in.readInt() != MAGIC || in.readInt() != VERSION) return result;
                 int count = in.readInt();
-                long expectedLength = Integer.BYTES + (long) count * Long.BYTES * 2L;
+                long expectedLength = 12L + (long) count * Long.BYTES * 2L;
                 if (count < 0 || count > MAX_FILE_ENTRIES || expectedLength != length) {
                     throw new IOException("invalid hash sidecar entry count");
                 }

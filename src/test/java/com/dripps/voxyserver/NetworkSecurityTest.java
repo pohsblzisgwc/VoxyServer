@@ -247,6 +247,19 @@ public class NetworkSecurityTest {
         assert tracker.hasSent(20L, 222L) : "Tracker should recognize acknowledged section 20L";
         assert !tracker.hasSent(30L, 333L) : "Tracker should not recognize un-manifested section";
 
+        assert !tracker.isManifestGated(dim, 101L) : "initial grace should expire";
+        assert tracker.applyManifestBatch(dim, session.streamEpoch(), session.manifestRequestId(),
+                0, new long[]{30L}, new long[]{333L}) : "a late bounded page must remain valid after grace";
+        var next = tracker.beginSession(dim, true, 200L);
+        assert next.streamEpoch() != session.streamEpoch() : "new session must not reuse an old epoch";
+        assert !tracker.hasSent(10L, 111L) : "a new server state must not inherit verified content";
+        assert !tracker.applyManifestBatch(dim, session.streamEpoch(), session.manifestRequestId(),
+                0, keys, hashes) : "old session page was accepted";
+        tracker.deferPacedSection(99L, 99L, 300L);
+        assert tracker.pollDeferredPacedSection(300L) == PlayerLodTracker.NO_SECTION_KEY;
+        assert tracker.pollDeferredPacedSection(301L) == PlayerLodTracker.NO_SECTION_KEY;
+        assert tracker.pollDeferredPacedSection(302L) == 99L : "paced work must cross ticks and recover";
+
         System.out.println("  ✓ testPlayerLodTrackerManifest");
     }
 }

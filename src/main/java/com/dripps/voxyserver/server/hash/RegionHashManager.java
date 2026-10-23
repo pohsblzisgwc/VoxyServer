@@ -67,7 +67,7 @@ public class RegionHashManager {
     }
 
     // dimension -> (regionKey -> RegionEntry)
-    private final ConcurrentHashMap<Identifier, ConcurrentHashMap<Long, RegionEntry>> dimensionRegions = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Identifier, com.dripps.voxyserver.util.BoundedLruCache<Long, RegionEntry>> dimensionRegions = new ConcurrentHashMap<>();
 
     private RegionHashManager() {}
 
@@ -93,24 +93,24 @@ public class RegionHashManager {
         return getRegionKey(secX >> 4, secZ >> 4);
     }
 
-    private ConcurrentHashMap<Long, RegionEntry> getDimMap(Identifier dimension) {
-        return dimensionRegions.computeIfAbsent(dimension, k -> new ConcurrentHashMap<>());
+    private com.dripps.voxyserver.util.BoundedLruCache<Long, RegionEntry> getDimMap(Identifier dimension) {
+        return dimensionRegions.computeIfAbsent(dimension, k -> new com.dripps.voxyserver.util.BoundedLruCache<>(2048));
     }
 
-    public void updateSectionHash(Identifier dimension, long sectionKey, long[] rawVoxelData) {
+    // The caller supplies the shared semantic content hash, never raw mapper IDs.
+    public void updateSectionHash(Identifier dimension, long sectionKey, long sectionHash) {
         if (dimension == null) return;
-        long sectionHash = FastHash.hashVoxelData(rawVoxelData);
         if (sectionHash == 0L) sectionHash = 1L;
 
         long regKey = getRegionKeyForSection(sectionKey);
-        ConcurrentHashMap<Long, RegionEntry> dimMap = getDimMap(dimension);
-        RegionEntry entry = dimMap.computeIfAbsent(regKey, k -> new RegionEntry());
+        com.dripps.voxyserver.util.BoundedLruCache<Long, RegionEntry> dimMap = getDimMap(dimension);
+        RegionEntry entry = dimMap.compute(regKey, (k, old) -> old == null ? new RegionEntry() : old);
         entry.updateSection(sectionKey, sectionHash);
     }
 
     public void invalidateSection(Identifier dimension, long sectionKey) {
         if (dimension == null) return;
-        ConcurrentHashMap<Long, RegionEntry> dimMap = dimensionRegions.get(dimension);
+        com.dripps.voxyserver.util.BoundedLruCache<Long, RegionEntry> dimMap = dimensionRegions.get(dimension);
         if (dimMap == null) return;
         long regKey = getRegionKeyForSection(sectionKey);
         RegionEntry entry = dimMap.get(regKey);
@@ -121,10 +121,10 @@ public class RegionHashManager {
 
     public long getRegionHash(Identifier dimension, long regionKey) {
         if (dimension == null) return 0L;
-        ConcurrentHashMap<Long, RegionEntry> dimMap = dimensionRegions.get(dimension);
+        com.dripps.voxyserver.util.BoundedLruCache<Long, RegionEntry> dimMap = dimensionRegions.get(dimension);
         if (dimMap == null) return 0L;
         RegionEntry entry = dimMap.get(regionKey);
-        if (entry == null || entry.getState() == HashState.DIRTY || entry.getState() == HashState.UNCOMPUTED) {
+        if (entry == null || entry.getState() != HashState.COMPLETE) {
             return 0L;
         }
         return entry.getHash();
@@ -132,7 +132,7 @@ public class RegionHashManager {
 
     public HashState getRegionState(Identifier dimension, long regionKey) {
         if (dimension == null) return HashState.UNCOMPUTED;
-        ConcurrentHashMap<Long, RegionEntry> dimMap = dimensionRegions.get(dimension);
+        com.dripps.voxyserver.util.BoundedLruCache<Long, RegionEntry> dimMap = dimensionRegions.get(dimension);
         if (dimMap == null) return HashState.UNCOMPUTED;
         RegionEntry entry = dimMap.get(regionKey);
         return entry == null ? HashState.UNCOMPUTED : entry.getState();
@@ -140,11 +140,11 @@ public class RegionHashManager {
 
     public boolean isRegionSynced(Identifier dimension, long regionKey, long clientHash) {
         if (clientHash == 0L || dimension == null) return false;
-        ConcurrentHashMap<Long, RegionEntry> dimMap = dimensionRegions.get(dimension);
+        com.dripps.voxyserver.util.BoundedLruCache<Long, RegionEntry> dimMap = dimensionRegions.get(dimension);
         if (dimMap == null) return false;
         RegionEntry entry = dimMap.get(regionKey);
         if (entry == null) return false;
-        if (entry.getState() == HashState.DIRTY || entry.getState() == HashState.UNCOMPUTED) {
+        if (entry.getState() != HashState.COMPLETE) {
             return false;
         }
         return entry.getHash() != 0L && entry.getHash() == clientHash;

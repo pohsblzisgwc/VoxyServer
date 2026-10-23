@@ -28,6 +28,11 @@ public class VoxyServerConfig {
     public boolean debugTrackingEnabled = false;
     public int debugTrackingInterval = 200;
     public boolean hashSyncEnabled = true;
+    public int hashWorkIntervalTicks = 20;
+    public int maxHashComputationsPerInterval = 64;
+    public int maxHashMillisPerInterval = 10;
+    public int hashRecheckIntervalTicks = 1200;
+    public int manifestRefreshIntervalTicks = 600;
     public int maxBandwidthBytesPerSec = 250_000;
     public boolean enableDistancePacing = true;
     public boolean enableRegionHashSync = false;
@@ -49,6 +54,11 @@ public class VoxyServerConfig {
         if (dirtyTrackingInterval < 1) errors.add("dirtytrackinginterval must be at least 1, got " + dirtyTrackingInterval);
         if (debugTrackingInterval < 1) errors.add("debugtrackinginterval must be at least 1, got " + debugTrackingInterval);
         if (maxBandwidthBytesPerSec < 0) errors.add("maxbandwidthbytespersec cannot be negative, got " + maxBandwidthBytesPerSec);
+        if (hashWorkIntervalTicks < 1 || hashWorkIntervalTicks > 1200) errors.add("hashWorkIntervalTicks must be 1..1200");
+        if (maxHashComputationsPerInterval < 1 || maxHashComputationsPerInterval > 4096) errors.add("maxHashComputationsPerInterval must be 1..4096");
+        if (maxHashMillisPerInterval < 1 || maxHashMillisPerInterval > 1000) errors.add("maxHashMillisPerInterval must be 1..1000");
+        if (hashRecheckIntervalTicks < hashWorkIntervalTicks) errors.add("hashRecheckIntervalTicks must be >= hashWorkIntervalTicks");
+        if (manifestRefreshIntervalTicks < 100) errors.add("manifestRefreshIntervalTicks must be >= 100");
         return errors;
     }
 

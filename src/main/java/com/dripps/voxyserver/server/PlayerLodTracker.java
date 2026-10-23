@@ -19,8 +19,10 @@ public class PlayerLodTracker {
     private final Long2LongOpenHashMap sectionOwners = new Long2LongOpenHashMap();
     private final Map<Long, OutstandingBatch> outstandingBatches = new HashMap<>();
     private final Map<Long, Long> deferredDirtySections = new LinkedHashMap<>();
-    private final Map<Long, Long> deferredPacedSections = new LinkedHashMap<>();
+    private record PacedEntry(long key, long releaseTick) {}
+    private final Map<Long, PacedEntry> deferredPacedSections = new LinkedHashMap<>();
     private final Long2LongOpenHashMap clientRegionHashes = new Long2LongOpenHashMap();
+    private long nextManifestRefreshTick;
     private int manifestCenterX;
     private int manifestCenterZ;
     private int manifestRadius = -1;
@@ -91,6 +93,10 @@ public class PlayerLodTracker {
                 && acknowledgedSectionHashes.get(sectionKey) == hash;
     }
 
+    public synchronized boolean hasKnownSection(long sectionKey) {
+        return acknowledgedSectionHashes.containsKey(sectionKey);
+    }
+
     public synchronized boolean hasOutstanding(long sectionKey) {
         return sectionOwners.containsKey(sectionKey);
     }
@@ -111,7 +117,9 @@ public class PlayerLodTracker {
     public synchronized StreamSession beginSession(Identifier dimension, boolean manifestRequired,
                                                    long deadlineTick) {
         clearOutstandingLocked();
-        streamEpoch = nextPositive(streamEpoch);
+        streamEpoch = com.dripps.voxyserver.util.SessionEpoch.next();
+        acknowledgedSectionHashes.clear();
+        clientRegionHashes.clear();
         nextBatchId = 0L;
         activeDimension = dimension;
         retryNotBeforeTick = 0L;
@@ -131,13 +139,18 @@ public class PlayerLodTracker {
     }
 
     public synchronized void recordManifestArea(int x, int z, int radius) {
+        recordManifestArea(x, z, radius, 0L, 600L);
+    }
+
+    public synchronized void recordManifestArea(int x, int z, int radius, long tick, long refreshTicks) {
+        nextManifestRefreshTick = tick + refreshTicks;
         manifestCenterX = x;
         manifestCenterZ = z;
         manifestRadius = radius;
     }
 
     public synchronized boolean needsManifestRefresh(int x, int z, int radius, long tick) {
-        if (awaitingManifestDim != null && tick < manifestDeadlineTick) return false;
+        if (tick < nextManifestRefreshTick || awaitingManifestDim != null) return false;
         int threshold = Math.max(4, radius >> 1);
         return manifestRadius != radius
                 || Math.abs((long) x - manifestCenterX) >= threshold
@@ -176,17 +189,25 @@ public class PlayerLodTracker {
     }
 
     public synchronized void deferPacedSection(long compositeKey, long sectionKey) {
+        deferPacedSection(compositeKey, sectionKey, 0L);
+    }
+
+    public synchronized void deferPacedSection(long compositeKey, long sectionKey, long tick) {
         if (deferredPacedSections.size() < 4096 || deferredPacedSections.containsKey(compositeKey)) {
-            deferredPacedSections.put(compositeKey, sectionKey);
+            deferredPacedSections.put(compositeKey, new PacedEntry(sectionKey, tick + 2));
         }
     }
 
     public synchronized long pollDeferredPacedSection() {
+        return pollDeferredPacedSection(Long.MAX_VALUE);
+    }
+
+    public synchronized long pollDeferredPacedSection(long tick) {
         var iterator = deferredPacedSections.entrySet().iterator();
         while (iterator.hasNext()) {
             var entry = iterator.next();
-            if (sectionOwners.containsKey(entry.getKey())) continue;
-            long key = entry.getValue();
+            if (sectionOwners.containsKey(entry.getKey()) || entry.getValue().releaseTick() > tick) continue;
+            long key = entry.getValue().key();
             iterator.remove();
             return key;
         }
@@ -347,9 +368,12 @@ public class PlayerLodTracker {
         return acknowledgedSectionHashes.size();
     }
 
+    public synchronized boolean matchesManifest(Identifier dimension, long epoch, long requestId) {
+        return matchesManifestLocked(dimension, epoch, requestId);
+    }
+
     private boolean matchesManifestLocked(Identifier dimension, long epoch, long requestId) {
-        return awaitingManifestDim != null
-                && awaitingManifestDim.equals(dimension)
+        return dimension.equals(activeDimension)
                 && streamEpoch == epoch
                 && manifestRequestId == requestId;
     }

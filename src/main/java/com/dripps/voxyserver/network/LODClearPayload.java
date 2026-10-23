@@ -7,7 +7,8 @@ import net.minecraft.resources.Identifier;
 
 import java.util.Optional;
 
-// tells client to clear cached lods for a dimension or all dimensions
+// Legacy signal: invalidate stream verification/work for a dimension or all dimensions.
+// Persistent client terrain is overwrite-only and must never be erased by this signal.
 public record LODClearPayload(
         Optional<Identifier> dimension
 ) implements CustomPacketPayload {

@@ -162,3 +162,14 @@ publishing {
         // retrieving dependencies.
     }
 }
+
+// These suites have main methods rather than JUnit annotations.
+tasks.register('runRegressionTests', JavaExec) {
+    group = 'verification'
+    description = 'Runs the standalone synchronization, network and throttling regressions.'
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.dripps.voxyserver.TestRunner'
+    enableAssertions = true
+}
+check.dependsOn runRegressionTests

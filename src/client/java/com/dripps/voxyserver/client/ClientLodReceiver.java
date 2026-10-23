@@ -5,6 +5,7 @@ import com.dripps.voxyserver.client.service.RemoteIngestService;
 import com.dripps.voxyserver.network.LODBatchResultPayload;
 import com.dripps.voxyserver.network.LODClearPayload;
 import com.dripps.voxyserver.network.LODHandshakePayload;
+import com.dripps.voxyserver.network.LODManifestAckPayload;
 import com.dripps.voxyserver.network.LODHashSyncSettingsPayload;
 import com.dripps.voxyserver.network.LODProtocolPayload;
 import com.dripps.voxyserver.network.LODServerSettingsPayload;
@@ -72,7 +73,6 @@ public final class ClientLodReceiver {
             clearQueuedInbound(false);
             ClientLodSettings.reset();
             setIngestSession(null, 0L);
-            setRemoteIngest(false);
             ClientLodHashStore.get().flush();
         });
 
@@ -102,9 +102,9 @@ public final class ClientLodReceiver {
             networkEpoch = payload.streamEpoch();
             networkDimension = payload.dimension();
             context.client().execute(() -> {
+                if (networkEpoch != payload.streamEpoch() || !Objects.equals(networkDimension, payload.dimension())) return;
                 clearStaleQueuedInbound(payload.streamEpoch());
                 if (changed) setIngestSession(payload.dimension(), payload.streamEpoch());
-                setRemoteIngest(ClientLodSettings.isEnabled());
                 ClientLodSettings.applyStreamSession(payload);
             });
         });
@@ -127,6 +127,9 @@ public final class ClientLodReceiver {
             }
             scheduleDrain(context.client());
         });
+
+        ClientPlayNetworking.registerGlobalReceiver(LODManifestAckPayload.TYPE, (payload, context) ->
+                context.client().execute(() -> ClientLodSettings.acknowledge(payload)));
 
         ClientPlayNetworking.registerGlobalReceiver(LODClearPayload.TYPE, (payload, context) ->
                 context.client().execute(() -> handleClear(payload)));
@@ -196,7 +199,6 @@ public final class ClientLodReceiver {
             return;
         }
 
-        ((IVoxyServerIngestAccess) instance).voxyserver$setUsingRemoteIngest(true);
         service.startSession(dimension, inbound.payload.streamEpoch());
         boolean accepted = service.enqueueIngest(
                 worldId,
@@ -271,19 +273,11 @@ public final class ClientLodReceiver {
         });
     }
 
-    private static void setRemoteIngest(boolean enabled) {
-        VoxyInstance instance = VoxyCommon.getInstance();
-        if (instance != null) {
-            ((IVoxyServerIngestAccess) instance).voxyserver$setUsingRemoteIngest(enabled);
-        }
-    }
-
     static void disableRemoteIngest() {
         networkEpoch = 0L;
         networkDimension = null;
         clearQueuedInbound(true);
         setIngestSession(null, 0L);
-        setRemoteIngest(false);
     }
 
     private static void setIngestSession(Identifier dimension, long epoch) {
@@ -307,9 +301,11 @@ public final class ClientLodReceiver {
     }
 
     private static void handleClear(LODClearPayload payload) {
-        ClientLevel level = Minecraft.getInstance().level;
-        if (level != null && networkDimension != null) {
-            setIngestSession(networkDimension, networkEpoch);
-        }
+        if (payload.dimension().isPresent() && !Objects.equals(payload.dimension().get(), networkDimension)) return;
+        // A legacy clear signal invalidates verification and in-flight work only.
+        // Server absence must never erase locally acquired Voxy terrain.
+        clearQueuedInbound(true);
+        setIngestSession(null, 0L);
+        ClientLodSettings.invalidateSession();
     }
 }

@@ -1,9 +1,9 @@
 package com.dripps.voxyserver.client;
 
 import com.dripps.voxyserver.network.LODManifestPayload;
+import com.dripps.voxyserver.network.LODManifestAckPayload;
 import com.dripps.voxyserver.network.LODPreferencesPayload;
 import com.dripps.voxyserver.network.LODStreamSessionPayload;
-import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
 import me.cortex.voxy.common.world.WorldEngine;
 import me.cortex.voxy.commonImpl.VoxyCommon;
 import me.cortex.voxy.commonImpl.WorldIdentifier;
@@ -45,6 +45,12 @@ public final class ClientLodSettings {
     private static volatile Identifier sessionDimension;
     private static volatile long streamEpoch;
     private static volatile long manifestRequestId;
+    private static volatile String cacheNamespace = "unbound";
+    private static ManifestChunk inFlight;
+    private static int manifestSendTicks;
+    private static final java.util.concurrent.atomic.AtomicLong nextPageId = new java.util.concurrent.atomic.AtomicLong();
+    public static String hashStoreKey(String worldId) { return cacheNamespace + "_" + worldId; }
+
     private static int lastReportedRadius = -1;
     private static String activeServerKey;
     private static ClientLodConfig.Preferences activePreferences = CONFIG.getPreferencesForServer(null);
@@ -52,11 +58,12 @@ public final class ClientLodSettings {
     private record ManifestRequest(WorldIdentifier worldId, Identifier dimension,
                                    int playerSectionX, int playerSectionZ, int radiusSections,
                                    long streamEpoch, long requestId,
-                                   long connectionGeneration, long buildGeneration) {}
+                                   long connectionGeneration, long buildGeneration,
+                                   net.minecraft.core.Registry<net.minecraft.world.level.biome.Biome> biomes) {}
 
     private record ManifestChunk(Identifier dimension, long streamEpoch, long requestId,
                                  long[] keys, long[] hashes, int status,
-                                 long connectionGeneration, long buildGeneration) {}
+                                 long connectionGeneration, long buildGeneration, long pageId) {}
 
     private static final class ManifestCanceledException extends RuntimeException {}
 
@@ -70,6 +77,7 @@ public final class ClientLodSettings {
         streamEpoch = 0L;
         manifestRequestId = 0L;
         manifestChunks.clear();
+        inFlight = null;
         pendingManifestRequest.set(null);
         connectionGeneration.incrementAndGet();
         buildGeneration.incrementAndGet();
@@ -93,19 +101,18 @@ public final class ClientLodSettings {
 
     public static void applyHashSyncSettings(boolean enabled) {
         serverHashSyncEnabled = enabled;
-        if (!enabled) {
-            buildGeneration.incrementAndGet();
-            manifestChunks.clear();
-            pendingManifestRequest.set(null);
-        }
+        // Inventory reconciliation remains active when reuse is disabled.
     }
 
     public static void applyStreamSession(LODStreamSessionPayload payload) {
+        cacheNamespace = payload.worldIdentity().toString() + "_semantic" + payload.hashVersion();
+        nextPageId.set(0);
         sessionDimension = payload.dimension();
         streamEpoch = payload.streamEpoch();
         manifestRequestId = payload.manifestRequestId();
         long generation = buildGeneration.incrementAndGet();
         manifestChunks.clear();
+        inFlight = null;
         pendingManifestRequest.set(null);
         if (!payload.manifestRequired()) return;
         requestManifestBuild(payload, generation);
@@ -120,28 +127,50 @@ public final class ClientLodSettings {
             }
         }
 
-        ManifestChunk chunk = manifestChunks.poll();
+        manifestSendTicks++;
+        if (inFlight != null && manifestSendTicks < 100) return;
+        if (manifestSendTicks < 10) return;
+        ManifestChunk chunk = inFlight == null ? manifestChunks.poll() : inFlight;
         if (chunk == null) return;
         if (!isCurrent(chunk)) return;
         Minecraft minecraft = Minecraft.getInstance();
         ClientLevel level = minecraft.level;
         if (minecraft.getConnection() == null || level == null
                 || !chunk.dimension.equals(level.dimension().identifier())) return;
+        inFlight = chunk;
+        manifestSendTicks = 0;
         ClientPlayNetworking.send(new LODManifestPayload(
                 chunk.dimension,
                 chunk.streamEpoch,
                 chunk.requestId,
                 chunk.keys,
                 chunk.hashes,
-                chunk.status
+                chunk.status,
+                chunk.pageId
         ));
+    }
+
+    public static void acknowledge(LODManifestAckPayload ack) {
+        ManifestChunk chunk = inFlight;
+        if (chunk == null || !isCurrent(chunk) || !chunk.dimension.equals(ack.dimension())
+                || chunk.streamEpoch != ack.streamEpoch() || chunk.requestId != ack.requestId()
+                || chunk.pageId != ack.pageId()) return;
+        manifestSendTicks = 0;
+        if (!ack.retry()) inFlight = null;
+    }
+
+    public static void invalidateSession() {
+        buildGeneration.incrementAndGet();
+        manifestChunks.clear();
+        inFlight = null;
+        pendingManifestRequest.set(null);
     }
 
     private static void requestManifestBuild(LODStreamSessionPayload session, long generation) {
         Minecraft minecraft = Minecraft.getInstance();
         ClientLevel level = minecraft.level;
         var player = minecraft.player;
-        if (!protocolOk || !serverHashSyncEnabled || !isEnabled()
+        if (!protocolOk || !isEnabled()
                 || serverMaxRadius < 0 || level == null || player == null
                 || !session.dimension().equals(level.dimension().identifier())) {
             enqueueTerminal(session, LODManifestPayload.FAILED, generation);
@@ -161,7 +190,8 @@ public final class ClientLodSettings {
                 session.streamEpoch(),
                 session.manifestRequestId(),
                 connectionGeneration.get(),
-                generation
+                generation,
+                level.registryAccess().lookupOrThrow(net.minecraft.core.registries.Registries.BIOME)
         );
         pendingManifestRequest.set(request);
         scheduleManifestBuild();
@@ -178,21 +208,11 @@ public final class ClientLodSettings {
             finishManifestBuild();
             return;
         }
-        ClientLodHashStore.get().snapshotAsync(
-                request.worldId.getWorldId(),
-                () -> isCurrent(request)
-        ).whenComplete((stored, error) -> manifestExecutor.execute(() -> {
-            try {
-                if (!isCurrent(request)) return;
-                if (error != null) {
-                    enqueueTerminal(request, LODManifestPayload.FAILED);
-                } else {
-                    buildManifest(request, stored);
-                }
-            } finally {
-                finishManifestBuild();
-            }
-        }));
+        try {
+            buildManifest(request);
+        } finally {
+            finishManifestBuild();
+        }
     }
 
     private static void finishManifestBuild() {
@@ -200,7 +220,7 @@ public final class ClientLodSettings {
         if (pendingManifestRequest.get() != null) scheduleManifestBuild();
     }
 
-    private static void buildManifest(ManifestRequest request, Long2LongOpenHashMap stored) {
+    private static void buildManifest(ManifestRequest request) {
         WorldEngine engine = request.worldId.getOrCreateEngine();
         if (engine == null || !engine.isLive()) {
             enqueueTerminal(request, LODManifestPayload.FAILED);
@@ -211,15 +231,36 @@ public final class ClientLodSettings {
             long[] keys = new long[LODManifestPayload.MAX_ENTRIES];
             long[] hashes = new long[LODManifestPayload.MAX_ENTRIES];
             int[] count = new int[1];
+            var budget = new com.dripps.voxyserver.util.HashWorkBudget();
+            String storeKey = hashStoreKey(request.worldId.getWorldId());
             engine.storage.iteratePositions(0, key -> {
                 if (!isCurrent(request)) throw new ManifestCanceledException();
                 int sectionX = WorldEngine.getX(key);
                 int sectionZ = WorldEngine.getZ(key);
                 if (Math.abs(sectionX - request.playerSectionX) > request.radiusSections
-                        || Math.abs(sectionZ - request.playerSectionZ) > request.radiusSections
-                        || !stored.containsKey(key)) return;
+                        || Math.abs(sectionZ - request.playerSectionZ) > request.radiusSections) return;
+                while (!budget.tryAcquire(System.nanoTime() / 50_000_000L, 20, 32,
+                        TimeUnit.MILLISECONDS.toNanos(20))) {
+                    if (!isCurrent(request) || Thread.currentThread().isInterrupted()) throw new ManifestCanceledException();
+                    java.util.concurrent.locks.LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(25));
+                }
+                long started = System.nanoTime();
+                var section = engine.acquireIfExists(key);
+                if (section == null) {
+                    budget.recordNanos(System.nanoTime() - started);
+                    return;
+                }
+                long hash;
+                try {
+                    hash = com.dripps.voxyserver.util.SemanticPalette.hashStored(section.copyData(), engine.getMapper(), request.biomes);
+                } finally {
+                    section.release();
+                    budget.recordNanos(System.nanoTime() - started);
+                }
+                if (!isCurrent(request)) throw new ManifestCanceledException();
+                ClientLodHashStore.get().recordBatch(storeKey, new long[]{key}, new long[]{hash});
                 keys[count[0]] = key;
-                hashes[count[0]] = stored.get(key);
+                hashes[count[0]] = hash;
                 count[0]++;
                 if (count[0] == keys.length) {
                     enqueueChunk(request, Arrays.copyOf(keys, count[0]),
@@ -246,7 +287,7 @@ public final class ClientLodSettings {
     private static void enqueueChunk(ManifestRequest request, long[] keys, long[] hashes, int status) {
         ManifestChunk chunk = new ManifestChunk(
                 request.dimension, request.streamEpoch, request.requestId,
-                keys, hashes, status, request.connectionGeneration, request.buildGeneration);
+                keys, hashes, status, request.connectionGeneration, request.buildGeneration, nextPageId.getAndIncrement());
         while (isCurrent(request)) {
             try {
                 if (manifestChunks.offer(chunk, 100L, TimeUnit.MILLISECONDS)) return;
@@ -265,13 +306,12 @@ public final class ClientLodSettings {
     private static void enqueueTerminal(LODStreamSessionPayload session, int status, long generation) {
         ManifestChunk chunk = new ManifestChunk(
                 session.dimension(), session.streamEpoch(), session.manifestRequestId(),
-                EMPTY_LONGS, EMPTY_LONGS, status, connectionGeneration.get(), generation);
+                EMPTY_LONGS, EMPTY_LONGS, status, connectionGeneration.get(), generation, nextPageId.getAndIncrement());
         manifestChunks.offer(chunk);
     }
 
     private static boolean isCurrent(ManifestRequest request) {
         return protocolOk
-                && serverHashSyncEnabled
                 && connectionGeneration.get() == request.connectionGeneration
                 && buildGeneration.get() == request.buildGeneration
                 && streamEpoch == request.streamEpoch
@@ -314,6 +354,7 @@ public final class ClientLodSettings {
         streamEpoch = 0L;
         manifestRequestId = 0L;
         manifestChunks.clear();
+        inFlight = null;
         pendingManifestRequest.set(null);
         connectionGeneration.incrementAndGet();
         buildGeneration.incrementAndGet();

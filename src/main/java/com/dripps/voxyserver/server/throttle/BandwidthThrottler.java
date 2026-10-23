@@ -105,6 +105,11 @@ public class BandwidthThrottler {
                 }
             }
 
+            if (bytes > maxBurst) {
+                if (availableTokens < maxBurst) return false;
+                availableTokens -= bytes;
+                return true;
+            }
             if (availableTokens >= bytes) {
                 availableTokens -= bytes;
                 return true;

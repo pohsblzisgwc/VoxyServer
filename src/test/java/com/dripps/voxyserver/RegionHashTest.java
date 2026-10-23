@@ -79,16 +79,16 @@ public class RegionHashTest {
 
         // 2. Update section data: state transitions to PARTIAL and produces non-zero hash
         long[] voxelData = new long[]{100L, 200L, 300L};
-        manager.updateSectionHash(dim, secKey, voxelData);
+        manager.updateSectionHash(dim, secKey, 1234L);
 
         assert manager.getRegionState(dim, regKey) == RegionHashManager.HashState.PARTIAL :
                 "Region state must become PARTIAL after section update";
         long currentHash = manager.getRegionHash(dim, regKey);
-        assert currentHash != 0L : "Region hash must be non-zero";
+        assert currentHash == 0L : "Partial coverage must never be advertised as a complete region";
 
         // Client matches current hash -> isRegionSynced returns true
-        assert manager.isRegionSynced(dim, regKey, currentHash) :
-                "Region must be reported as synced when client presents matching hash";
+        assert !manager.isRegionSynced(dim, regKey, currentHash) :
+                "Partial region cannot prove that a client has complete coverage";
 
         // 3. Mark section as dirty (block change): state transitions to DIRTY
         manager.invalidateSection(dim, secKey);
@@ -108,17 +108,17 @@ public class RegionHashTest {
         Identifier overworld = Identifier.parse("minecraft:overworld");
         Identifier nether = Identifier.parse("minecraft:the_nether");
 
-        manager.updateSectionHash(overworld, 100L, new long[]{1L});
-        manager.updateSectionHash(nether, 100L, new long[]{2L});
+        manager.updateSectionHash(overworld, 100L, 1L);
+        manager.updateSectionHash(nether, 100L, 2L);
 
         long owRegKey = RegionHashManager.getRegionKeyForSection(100L);
-        assert manager.getRegionHash(overworld, owRegKey) != 0L : "Overworld hash must exist";
-        assert manager.getRegionHash(nether, owRegKey) != 0L : "Nether hash must exist";
+        assert manager.getRegionState(overworld, owRegKey) == RegionHashManager.HashState.PARTIAL : "Overworld hash must exist";
+        assert manager.getRegionState(nether, owRegKey) == RegionHashManager.HashState.PARTIAL : "Nether hash must exist";
 
         // Clear only overworld
         manager.clearDimension(overworld);
         assert manager.getRegionHash(overworld, owRegKey) == 0L : "Overworld hash must be cleared";
-        assert manager.getRegionHash(nether, owRegKey) != 0L : "Nether hash must be preserved";
+        assert manager.getRegionState(nether, owRegKey) == RegionHashManager.HashState.PARTIAL : "Nether hash must be preserved";
         System.out.println("  ✓ testDimensionClearing");
     }
 }

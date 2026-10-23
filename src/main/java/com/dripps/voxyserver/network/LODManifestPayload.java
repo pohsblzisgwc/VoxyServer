@@ -12,22 +12,28 @@ public record LODManifestPayload(
         long requestId,
         long[] keys,
         long[] hashes,
-        int status
+        int status,
+        long pageId
 ) implements CustomPacketPayload {
 
-    public static final int MAX_ENTRIES = 4096;
+    public static final int MAX_ENTRIES = 128;
     public static final int PART = 0;
     public static final int COMPLETE = 1;
     public static final int FAILED = 2;
     public static final int CANCELED = 3;
 
     public static final Type<LODManifestPayload> TYPE =
-            new Type<>(Identifier.parse("voxyserver:lod_manifest"));
+            new Type<>(Identifier.parse("voxyserver:lod_manifest_v3"));
 
     public static final StreamCodec<RegistryFriendlyByteBuf, LODManifestPayload> CODEC =
             StreamCodec.of(LODManifestPayload::write, LODManifestPayload::read);
 
+    public LODManifestPayload(Identifier dimension, long streamEpoch, long requestId, long[] keys, long[] hashes, int status) {
+        this(dimension, streamEpoch, requestId, keys, hashes, status, 0L);
+    }
+
     public LODManifestPayload {
+        if (pageId < 0) throw new IllegalArgumentException("invalid manifest page ID");
         if (dimension == null) {
             throw new IllegalArgumentException("dimension cannot be null");
         }
@@ -50,6 +56,7 @@ public record LODManifestPayload(
         buf.writeIdentifier(payload.dimension);
         buf.writeVarLong(payload.streamEpoch);
         buf.writeVarLong(payload.requestId);
+        buf.writeVarLong(payload.pageId);
         buf.writeByte(payload.status);
         int count = payload.keys.length;
         buf.writeVarInt(count);
@@ -63,6 +70,7 @@ public record LODManifestPayload(
         Identifier dimension = buf.readIdentifier();
         long streamEpoch = buf.readVarLong();
         long requestId = buf.readVarLong();
+        long pageId = buf.readVarLong();
         int status = buf.readByte() & 0xFF;
         int count = buf.readVarInt();
         if (streamEpoch < 0L || requestId < 0L || status < PART || status > CANCELED
@@ -80,7 +88,7 @@ public record LODManifestPayload(
             keys[i] = buf.readLong();
             hashes[i] = buf.readLong();
         }
-        return new LODManifestPayload(dimension, streamEpoch, requestId, keys, hashes, status);
+        return new LODManifestPayload(dimension, streamEpoch, requestId, keys, hashes, status, pageId);
     }
 
     @Override

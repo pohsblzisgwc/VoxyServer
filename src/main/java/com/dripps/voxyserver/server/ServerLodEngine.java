@@ -29,6 +29,8 @@ public class ServerLodEngine extends VoxyInstance {
     }
 
     private final Path basePath;
+    private final java.util.UUID worldIdentity;
+    public java.util.UUID getWorldIdentity() { return worldIdentity; }
     private final SectionSerializationStorage.Config storageConfig;
     private final ConcurrentHashMap<WorldIdentifier, Identifier> dimensionsByWorld = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<WorldIdentifier, StoredSectionPresenceIndex> presenceIndexes = new ConcurrentHashMap<>();
@@ -39,6 +41,11 @@ public class ServerLodEngine extends VoxyInstance {
     public ServerLodEngine(Path worldFolder) {
         super();
         this.basePath = worldFolder.resolve("voxyserver");
+        try {
+            this.worldIdentity = com.dripps.voxyserver.util.WorldIdentity.loadOrCreate(this.basePath.resolve("world-id"));
+        } catch (java.io.IOException failure) {
+            throw new IllegalStateException("Cannot establish LOD cache identity", failure);
+        }
         this.storageConfig = StorageConfigUtil.createDefaultSerializer();
         this.updateDedicatedThreads();
         Voxyserver.LOGGER.info("server lod engine started, storage at {}", this.basePath);

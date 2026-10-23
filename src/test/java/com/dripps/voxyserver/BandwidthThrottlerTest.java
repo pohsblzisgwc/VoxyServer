@@ -33,17 +33,19 @@ public class BandwidthThrottlerTest {
         BandwidthThrottler.TokenBucket bucket = new BandwidthThrottler.TokenBucket(100_000);
         long initialTokens = bucket.getAvailableTokens();
 
-        // Attempting to acquire more tokens than available must return false
+        assert bucket.tryAcquire(50_000) : "normal packet should fit";
+        assert bucket.getAvailableTokens() == initialTokens - 50_000;
         long excessiveBytes = initialTokens + 5000;
-        boolean acquired = bucket.tryAcquire(excessiveBytes);
-        assert !acquired : "tryAcquire must return false when requested bytes exceed available tokens";
-        assert bucket.getAvailableTokens() == initialTokens : "Tokens must NOT be deducted on failed acquisition";
-        assert bucket.getAvailableTokens() >= 0 : "Tokens must never become negative";
+        assert !bucket.tryAcquire(excessiveBytes) : "large packet must wait until bucket is full";
 
-        // Acquiring exact or fewer tokens must succeed and deduct precisely
-        boolean success = bucket.tryAcquire(50_000);
-        assert success : "tryAcquire must return true when tokens are sufficient";
-        assert bucket.getAvailableTokens() == initialTokens - 50_000 : "Tokens must be deducted by exact byte amount";
+        BandwidthThrottler.TokenBucket large = new BandwidthThrottler.TokenBucket(100_000);
+        long burst = large.getMaxBurst();
+        assert large.tryAcquire(burst + 5000) : "oversized packet must not deadlock a full bucket";
+        assert large.getAvailableTokens() == -5000 : "oversize must be repaid as debt";
+        assert !large.tryAcquire(1) : "debt must prevent immediate further sends";
+        large.refill(0);
+        large.refill(20);
+        assert large.getAvailableTokens() > 0 : "debt should recover at the configured rate";
         System.out.println("  ✓ testStrictDeduction");
     }
 

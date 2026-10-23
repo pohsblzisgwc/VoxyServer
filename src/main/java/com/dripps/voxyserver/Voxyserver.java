@@ -173,7 +173,7 @@ public class Voxyserver implements ModInitializer {
             }
         });
 
-        // handle dimension changes, clear players lod cache for old dimensions
+        // Handle dimension changes by replacing stream verification state; preserve client terrain.
         ServerEntityLevelChangeEvents.AFTER_PLAYER_CHANGE_LEVEL.register((player, origin, destination) -> {
             if (streamingService != null) {
                 streamingService.onDimensionChange(player, destination);

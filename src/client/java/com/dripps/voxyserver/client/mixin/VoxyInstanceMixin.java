@@ -5,23 +5,18 @@ import com.dripps.voxyserver.client.service.RemoteIngestService;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.thread.ServiceManager;
 import me.cortex.voxy.commonImpl.VoxyInstance;
-import me.cortex.voxy.commonImpl.WorldIdentifier;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
-import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 @Mixin(VoxyInstance.class)
 public abstract class VoxyInstanceMixin implements IVoxyServerIngestAccess {
 
     @Unique
     private RemoteIngestService voxyserver$remoteIngestService;
-
-    @Unique
-    private boolean voxyserver$usingRemoteIngest = false;
 
     @Shadow
     public abstract ServiceManager getServiceManager();
@@ -50,24 +45,11 @@ public abstract class VoxyInstanceMixin implements IVoxyServerIngestAccess {
     }
 
 
-    @Inject(
-            method = "isIngestEnabled(Lme/cortex/voxy/commonImpl/WorldIdentifier;)Z",
-            at = @At("HEAD"),
-            cancellable = true
-    )
-    private void voxyserver$disableClientSideIngest(WorldIdentifier worldId, CallbackInfoReturnable<Boolean> cir) {
-        if (this.voxyserver$usingRemoteIngest) {
-            cir.setReturnValue(false);
-        }
-    }
-
     @Override
     public RemoteIngestService voxyserver$getRemoteIngestService() {
         return this.voxyserver$remoteIngestService;
     }
 
-    @Override
-    public void voxyserver$setUsingRemoteIngest(boolean remoteIngest) {
-        this.voxyserver$usingRemoteIngest = remoteIngest;
-    }
+    // Native Voxy ingest remains enabled. Server streaming only overwrites sections
+    // it actually supplies, and must coexist with independently acquired terrain.
 }

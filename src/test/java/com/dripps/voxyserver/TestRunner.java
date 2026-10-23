@@ -14,7 +14,7 @@ public class TestRunner {
         System.out.println("=================================================\n");
 
         int passedSuites = 0;
-        int totalSuites = 4;
+        int totalSuites = 7;
 
         try {
             NetworkSecurityTest.runAllTests();
@@ -24,6 +24,15 @@ public class TestRunner {
             passedSuites++;
 
             DistancePacingTest.runAllTests();
+            passedSuites++;
+
+            SynchronizationProtocolTest.runAllTests();
+            passedSuites++;
+
+            SemanticSyncTest.runAllTests();
+            passedSuites++;
+
+            SemanticRegistryTest.runAllTests();
             passedSuites++;
 
             RegionHashTest.runAllTests();

@@ -4,7 +4,7 @@ import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
 
 public class VoxyServerNetworking {
 
-    public static final int PROTOCOL_VERSION = 2;
+    public static final int PROTOCOL_VERSION = 3;
 
     public static void register() {
         PayloadTypeRegistry.clientboundPlay().register(LODSectionPayload.TYPE, LODSectionPayload.CODEC);
@@ -15,6 +15,7 @@ public class VoxyServerNetworking {
         PayloadTypeRegistry.clientboundPlay().register(LODServerSettingsPayload.TYPE, LODServerSettingsPayload.CODEC);
         PayloadTypeRegistry.clientboundPlay().register(LODProtocolPayload.TYPE, LODProtocolPayload.CODEC);
         PayloadTypeRegistry.clientboundPlay().register(LODStreamSessionPayload.TYPE, LODStreamSessionPayload.CODEC);
+        PayloadTypeRegistry.clientboundPlay().register(LODManifestAckPayload.TYPE, LODManifestAckPayload.CODEC);
 
         PayloadTypeRegistry.serverboundPlay().register(LODPreferencesPayload.TYPE, LODPreferencesPayload.CODEC);
         PayloadTypeRegistry.serverboundPlay().register(LODManifestPayload.TYPE, LODManifestPayload.CODEC);

@@ -1,6 +1,9 @@
 package com.dripps.voxyserver.client.service;
 
 import com.dripps.voxyserver.client.ClientLodHashStore;
+import com.dripps.voxyserver.client.ClientLodSettings;
+import com.dripps.voxyserver.util.SemanticSectionHash;
+import com.dripps.voxyserver.util.SemanticPalette;
 import com.dripps.voxyserver.network.LODBatchResultPayload;
 import com.dripps.voxyserver.network.LODBulkPayload;
 import com.dripps.voxyserver.network.LODSectionPayload;
@@ -33,7 +36,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
 public final class RemoteIngestService {
-    private static final int WORKERS = 2;
+    private static final int WORKERS = 1;
     private static final int MAX_QUEUED_BATCHES = 64;
 
     private final ThreadPoolExecutor executor;
@@ -47,6 +50,7 @@ public final class RemoteIngestService {
         private final Identifier dimension;
         private final PreSerializedLodPayload raw;
         private final RegistryAccess registryAccess;
+        private final String hashStoreKey;
         private final long taskGeneration;
         private final Consumer<LODBatchResultPayload> completion;
         private final AtomicBoolean completed = new AtomicBoolean();
@@ -55,6 +59,7 @@ public final class RemoteIngestService {
                            PreSerializedLodPayload raw, RegistryAccess registryAccess,
                            long taskGeneration, Consumer<LODBatchResultPayload> completion) {
             this.worldId = worldId;
+            this.hashStoreKey = ClientLodSettings.hashStoreKey(worldId.getWorldId());
             this.dimension = dimension;
             this.raw = raw;
             this.registryAccess = registryAccess;
@@ -161,63 +166,74 @@ public final class RemoteIngestService {
 
         WorldEngine engine = task.worldId.getOrCreateEngine();
         if (engine == null || !engine.isLive()) return LODBatchResultPayload.FAILURE;
-        engine.markActive();
-        Mapper mapper = engine.getMapper();
-        long[] keys = new long[bulk.sections().size()];
-        long[] hashes = new long[bulk.sections().size()];
+        engine.acquireRef();
+        try {
+            engine.markActive();
+            Registry<Biome> semanticBiomes = task.registryAccess.lookupOrThrow(Registries.BIOME);
+            for (LODSectionPayload section : bulk.sections()) {
+                long actual = SemanticSectionHash.compute(SemanticPalette.resolve(section.lutBlockStateIds(),
+                        section.lutBiomeIds(), section.lutLight(), semanticBiomes), section.indexArray());
+                if (actual != section.contentHash()) return LODBatchResultPayload.FAILURE;
+            }
+            Mapper mapper = engine.getMapper();
+            long[] keys = new long[bulk.sections().size()];
+            long[] hashes = new long[bulk.sections().size()];
 
-        for (int sectionIndex = 0; sectionIndex < bulk.sections().size(); sectionIndex++) {
-            if (!isCurrent(task)) return LODBatchResultPayload.STALE;
-            LODSectionPayload section = bulk.sections().get(sectionIndex);
-            if (!task.dimension.equals(section.dimension())) return LODBatchResultPayload.FAILURE;
-            long[] remappedLut = remapLut(
-                    section.lutBlockStateIds(),
-                    section.lutBiomeIds(),
-                    section.lutLight(),
-                    mapper,
-                    task.registryAccess
-            );
+            for (int sectionIndex = 0; sectionIndex < bulk.sections().size(); sectionIndex++) {
+                if (!isCurrent(task)) return LODBatchResultPayload.STALE;
+                LODSectionPayload section = bulk.sections().get(sectionIndex);
+                if (!task.dimension.equals(section.dimension())) return LODBatchResultPayload.FAILURE;
+                long[] remappedLut = remapLut(
+                        section.lutBlockStateIds(),
+                        section.lutBiomeIds(),
+                        section.lutLight(),
+                        mapper,
+                        task.registryAccess
+                );
 
-            int secX = WorldEngine.getX(section.sectionKey());
-            int secY = WorldEngine.getY(section.sectionKey());
-            int secZ = WorldEngine.getZ(section.sectionKey());
-            short[] indexArray = section.indexArray();
+                int secX = WorldEngine.getX(section.sectionKey());
+                int secY = WorldEngine.getY(section.sectionKey());
+                int secZ = WorldEngine.getZ(section.sectionKey());
+                short[] indexArray = section.indexArray();
 
-            for (int oy = 0; oy < 2; oy++) {
-                for (int oz = 0; oz < 2; oz++) {
-                    for (int ox = 0; ox < 2; ox++) {
-                        VoxelizedSection voxelized = VoxelizedSection.createEmpty();
-                        voxelized.setPosition(secX * 2 + ox, secY * 2 + oy, secZ * 2 + oz);
-                        int nonAirCount = 0;
-                        for (int vy = 0; vy < 16; vy++) {
-                            for (int vz = 0; vz < 16; vz++) {
-                                for (int vx = 0; vx < 16; vx++) {
-                                    int sourceIndex = ((oy * 16 + vy) << 10)
-                                            | ((oz * 16 + vz) << 5) | (ox * 16 + vx);
-                                    int targetIndex = (vy << 8) | (vz << 4) | vx;
-                                    int lutIndex = indexArray[sourceIndex] & 0xFFFF;
-                                    if (lutIndex >= remappedLut.length) return LODBatchResultPayload.FAILURE;
-                                    long id = remappedLut[lutIndex];
-                                    voxelized.section[targetIndex] = id;
-                                    if (!Mapper.isAir(id)) nonAirCount++;
+                for (int oy = 0; oy < 2; oy++) {
+                    for (int oz = 0; oz < 2; oz++) {
+                        for (int ox = 0; ox < 2; ox++) {
+                            VoxelizedSection voxelized = VoxelizedSection.createEmpty();
+                            voxelized.setPosition(secX * 2 + ox, secY * 2 + oy, secZ * 2 + oz);
+                            int nonAirCount = 0;
+                            for (int vy = 0; vy < 16; vy++) {
+                                for (int vz = 0; vz < 16; vz++) {
+                                    for (int vx = 0; vx < 16; vx++) {
+                                        int sourceIndex = ((oy * 16 + vy) << 10)
+                                                | ((oz * 16 + vz) << 5) | (ox * 16 + vx);
+                                        int targetIndex = (vy << 8) | (vz << 4) | vx;
+                                        int lutIndex = indexArray[sourceIndex] & 0xFFFF;
+                                        if (lutIndex >= remappedLut.length) return LODBatchResultPayload.FAILURE;
+                                        long id = remappedLut[lutIndex];
+                                        voxelized.section[targetIndex] = id;
+                                        if (!Mapper.isAir(id)) nonAirCount++;
+                                    }
                                 }
                             }
+                            voxelized.lvl0NonAirCount = nonAirCount;
+                            WorldVoxilizedSectionMipper.mipSection(voxelized, mapper);
+                            WorldUpdater.insertUpdate(engine, voxelized);
                         }
-                        voxelized.lvl0NonAirCount = nonAirCount;
-                        WorldVoxilizedSectionMipper.mipSection(voxelized, mapper);
-                        WorldUpdater.insertUpdate(engine, voxelized);
                     }
                 }
+                keys[sectionIndex] = section.sectionKey();
+                hashes[sectionIndex] = section.contentHash();
             }
-            keys[sectionIndex] = section.sectionKey();
-            hashes[sectionIndex] = section.contentHash();
-        }
 
-        if (!isCurrent(task)) return LODBatchResultPayload.STALE;
-        if (!ClientLodHashStore.get().recordBatch(task.worldId.getWorldId(), keys, hashes)) {
-            return LODBatchResultPayload.FAILURE;
+            if (!isCurrent(task)) return LODBatchResultPayload.STALE;
+            if (!ClientLodHashStore.get().recordBatch(task.hashStoreKey, keys, hashes)) {
+                return LODBatchResultPayload.FAILURE;
+            }
+            return LODBatchResultPayload.SUCCESS;
+        } finally {
+            engine.releaseRef();
         }
-        return LODBatchResultPayload.SUCCESS;
     }
 
     private boolean isCurrent(IngestTask task) {
