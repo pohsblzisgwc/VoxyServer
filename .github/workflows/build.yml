@@ -71,6 +71,13 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
+          name: VoxyServer ${{ github.ref_name }} (Fabric 26.3)
+          previous_tag: v1.2.4
+          generate_release_notes: true
+          body: |
+            Protocol 3 requires updating the client and server together.
+
+            Section reuse now compares semantic block, biome, light, and voxel content. Rollbacks replace client data only when the server has actual section data; client-only cached terrain is preserved.
           files: |
             build/libs/*.jar
             build/libs/checksums-sha256.txt
