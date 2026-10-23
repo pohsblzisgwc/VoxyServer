@@ -38,6 +38,7 @@ public final class ClientLodReceiver {
     private static final AtomicLong connectionGeneration = new AtomicLong();
     private static int reservedBatches;
     private static long reservedBytes;
+    private static volatile long networkManifestRequest;
     private static volatile long networkEpoch;
     private static volatile Identifier networkDimension;
 
@@ -97,12 +98,15 @@ public final class ClientLodReceiver {
                 context.client().execute(() -> ClientLodSettings.applyHashSyncSettings(payload.enabled())));
 
         ClientPlayNetworking.registerGlobalReceiver(LODStreamSessionPayload.TYPE, (payload, context) -> {
+            if (networkEpoch == payload.streamEpoch() && payload.manifestRequestId() < networkManifestRequest) return;
+            networkManifestRequest = payload.manifestRequestId();
             boolean changed = networkEpoch != payload.streamEpoch()
                     || !Objects.equals(networkDimension, payload.dimension());
             networkEpoch = payload.streamEpoch();
             networkDimension = payload.dimension();
             context.client().execute(() -> {
-                if (networkEpoch != payload.streamEpoch() || !Objects.equals(networkDimension, payload.dimension())) return;
+                if (networkEpoch != payload.streamEpoch() || networkManifestRequest != payload.manifestRequestId()
+                        || !Objects.equals(networkDimension, payload.dimension())) return;
                 clearStaleQueuedInbound(payload.streamEpoch());
                 if (changed) setIngestSession(payload.dimension(), payload.streamEpoch());
                 ClientLodSettings.applyStreamSession(payload);

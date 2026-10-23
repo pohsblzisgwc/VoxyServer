@@ -46,7 +46,7 @@ public class VoxyServerConfig {
         if (maxClientVoxyRadius < 1 || maxClientVoxyRadius > 4096) {
             errors.add("maxClientVoxyRadius must be between 1 and 4096, got " + maxClientVoxyRadius);
         }
-        if (lodStreamRadius < 1) errors.add("lodstreamradius must be at least 1, got " + lodStreamRadius);
+        if (lodStreamRadius < 1 || lodStreamRadius > 4096) errors.add("lodStreamRadius must be 1..4096, got " + lodStreamRadius);
         if (maxSectionsPerTickPerPlayer < 1) errors.add("maxsectionspertickperplayer must be at least 1, got " + maxSectionsPerTickPerPlayer);
         if (sectionsPerPacket < 1) errors.add("sectionsperpacket must be at least 1, got " + sectionsPerPacket);
         if (tickInterval < 1) errors.add("tickinterval must be at least 1, got " + tickInterval);
@@ -54,65 +54,48 @@ public class VoxyServerConfig {
         if (dirtyTrackingInterval < 1) errors.add("dirtytrackinginterval must be at least 1, got " + dirtyTrackingInterval);
         if (debugTrackingInterval < 1) errors.add("debugtrackinginterval must be at least 1, got " + debugTrackingInterval);
         if (maxBandwidthBytesPerSec < 0) errors.add("maxbandwidthbytespersec cannot be negative, got " + maxBandwidthBytesPerSec);
-        if (hashWorkIntervalTicks < 1 || hashWorkIntervalTicks > 1200) errors.add("hashWorkIntervalTicks must be 1..1200");
-        if (maxHashComputationsPerInterval < 1 || maxHashComputationsPerInterval > 4096) errors.add("maxHashComputationsPerInterval must be 1..4096");
-        if (maxHashMillisPerInterval < 1 || maxHashMillisPerInterval > 1000) errors.add("maxHashMillisPerInterval must be 1..1000");
-        if (hashRecheckIntervalTicks < hashWorkIntervalTicks) errors.add("hashRecheckIntervalTicks must be >= hashWorkIntervalTicks");
-        if (manifestRefreshIntervalTicks < 100) errors.add("manifestRefreshIntervalTicks must be >= 100");
+        if (hashWorkIntervalTicks < 1 || hashWorkIntervalTicks > 1200) errors.add("hashWorkIntervalTicks must be 1..1200, got " + hashWorkIntervalTicks);
+        if (maxHashComputationsPerInterval < 1 || maxHashComputationsPerInterval > 4096) errors.add("maxHashComputationsPerInterval must be 1..4096, got " + maxHashComputationsPerInterval);
+        if (maxHashMillisPerInterval < 1 || maxHashMillisPerInterval > 1000) errors.add("maxHashMillisPerInterval must be 1..1000, got " + maxHashMillisPerInterval);
+        if (hashRecheckIntervalTicks < hashWorkIntervalTicks) errors.add("hashRecheckIntervalTicks must be >= hashWorkIntervalTicks, got " + hashRecheckIntervalTicks);
+        if (manifestRefreshIntervalTicks < 100) errors.add("manifestRefreshIntervalTicks must be >= 100, got " + manifestRefreshIntervalTicks);
         return errors;
     }
 
-    public static VoxyServerConfig reload() {
-        Path path = getConfigPath();
-        if (!Files.exists(path)) return null;
+    /** Shared by startup, reload and command application; never normalize an invalid value away. */
+    public void requireValid() {
+        List<String> errors = validate();
+        if (!errors.isEmpty()) throw new IllegalArgumentException(String.join("; ", errors));
+    }
+
+    private static VoxyServerConfig readValidated(Path path) {
         try {
-            String json = Files.readString(path);
-            VoxyServerConfig candidate = GSON.fromJson(json, VoxyServerConfig.class);
-            if (candidate == null) {
-                Voxyserver.LOGGER.warn("config reload failed bc file parsed as null");
-                return null;
-            }
-            if (candidate.maxClientVoxyRadius != 1024) {
-                candidate.lodStreamRadius = candidate.maxClientVoxyRadius;
-            } else if (candidate.lodStreamRadius != 1024) {
-                candidate.maxClientVoxyRadius = candidate.lodStreamRadius;
-            }
-            List<String> errors = candidate.validate();
-            if (!errors.isEmpty()) {
-                for (String err : errors) {
-                    Voxyserver.LOGGER.warn("config reload rejected: {}", err);
-                }
-                return null;
-            }
+            VoxyServerConfig candidate = GSON.fromJson(Files.readString(path), VoxyServerConfig.class);
+            if (candidate == null) throw new IllegalArgumentException("configuration is null");
+            candidate.requireValid();
+            if (candidate.maxClientVoxyRadius != 1024) candidate.lodStreamRadius = candidate.maxClientVoxyRadius;
+            else if (candidate.lodStreamRadius != 1024) candidate.maxClientVoxyRadius = candidate.lodStreamRadius;
+            candidate.requireValid();
             return candidate;
         } catch (Exception e) {
-            Voxyserver.LOGGER.warn("config reload failed: {}", e.getMessage());
+            Voxyserver.LOGGER.warn("config rejected at {}: {}", path, e.getMessage());
             return null;
         }
     }
 
-    public static VoxyServerConfig load() {
-        Path configPath = getConfigPath();
-        if (Files.exists(configPath)) {
-            try {
-                String json = Files.readString(configPath);
-                VoxyServerConfig config = GSON.fromJson(json, VoxyServerConfig.class);
-                if (config != null) {
-                    if (config.maxClientVoxyRadius != 1024) {
-                        config.lodStreamRadius = config.maxClientVoxyRadius;
-                    } else if (config.lodStreamRadius != 1024) {
-                        config.maxClientVoxyRadius = config.lodStreamRadius;
-                    }
-                    config.save();
-                    return config;
-                }
-            } catch (Exception e) {
-                Voxyserver.LOGGER.warn("failed to load config, using defaults", e);
-            }
+    public static VoxyServerConfig reload() { return reload(getConfigPath()); }
+    public static VoxyServerConfig reload(Path path) { return readValidated(path); }
+    public static VoxyServerConfig load() { return load(getConfigPath()); }
+    public static VoxyServerConfig load(Path path) {
+        if (Files.exists(path)) {
+            VoxyServerConfig candidate = readValidated(path);
+            if (candidate != null) return candidate;
+            Voxyserver.LOGGER.warn("using validated defaults; invalid config at {} is preserved for repair", path);
         }
-        VoxyServerConfig config = new VoxyServerConfig();
-        config.save();
-        return config;
+        VoxyServerConfig defaults = new VoxyServerConfig();
+        defaults.requireValid();
+        if (!Files.exists(path)) defaults.save(path);
+        return defaults;
     }
 
     public VoxyServerConfig copy() {
@@ -120,7 +103,11 @@ public class VoxyServerConfig {
     }
 
     public void save() {
-        Path configPath = getConfigPath();
+        save(getConfigPath());
+    }
+
+    public void save(Path configPath) {
+        requireValid();
         try {
             Files.createDirectories(configPath.getParent());
             Files.writeString(configPath, GSON.toJson(this));

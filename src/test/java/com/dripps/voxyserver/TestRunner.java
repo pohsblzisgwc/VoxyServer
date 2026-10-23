@@ -14,9 +14,16 @@ public class TestRunner {
         System.out.println("=================================================\n");
 
         int passedSuites = 0;
-        int totalSuites = 7;
+        int totalSuites = 10;
 
         try {
+            ManifestSnapshotTest.runAllTests();
+            passedSuites++;
+            OutboundQueueTest.runAllTests();
+            passedSuites++;
+            ConfigValidationTest.runAllTests();
+            passedSuites++;
+
             NetworkSecurityTest.runAllTests();
             passedSuites++;
 

@@ -138,6 +138,8 @@ config file is generated at `config/voxyserver.json` on first run.
 
 higher `lodStreamRadius` means more LOD coverage but more storage and bandwidth. `maxSectionsPerTickPerPlayer` controls how fast LODs are sent to new players or when moving into unexplored areas. `maxBandwidthBytesPerSec` strictly shapes network egress using a token bucket filter. `sectionsPerPacket` controls how many sections are packed into each network packet.
 
+Configuration files are validated before application or saving. Invalid startup files produce field-specific diagnostics and use validated defaults without overwriting the file. Invalid reloads retain the current validated configuration; commands and saves use the same validation guard. Legacy radius aliases are validated before normalization.
+
 ### distance-based pacing
 
 when `enableDistancePacing` is enabled, candidate sections are paced by distance:
@@ -149,11 +151,21 @@ Paced candidates are deferred into a recovery queue rather than dropped, guarant
 
 ### semantic cache synchronization and server load
 
-Protocol **3** requires matching VoxyServer versions on both sides. Section fingerprints describe voxel meaning: namespaced block names and sorted block-state properties, namespaced biome names, light, and voxel positions. Air variants and their discarded biome slots are normalized to match Voxy storage; air light is preserved. Mapper IDs, registry numbering, LUT order, duplicate/unused LUT entries, compression, and packet encoding do not define content identity. Both sides use the same hash implementation. The client verifies received payloads before ingest and computes inventory fingerprints from its actual stored voxels on a background worker; a sidecar hash alone is not proof that the LOD database still contains that content.
+Protocol **4** requires matching VoxyServer versions on both sides. Section fingerprints describe voxel meaning: namespaced block names and sorted block-state properties, namespaced biome names, light, and voxel positions. Air variants and their discarded biome slots are normalized to match Voxy storage; air light is preserved. Mapper IDs, registry numbering, LUT order, duplicate/unused LUT entries, compression, and packet encoding do not define content identity. Both sides use the same hash implementation. The client verifies received payloads before ingest and computes inventory fingerprints from its actual stored voxels on a background worker; a sidecar hash alone is not proof that the LOD database still contains that content.
 
 Hashing and inventory/storage work run off the Minecraft tick and render threads. The server shares a bounded fingerprint cache and a 128-section snapshot cache across players. Dirty callbacks invalidate these immediately. New work is limited globally by both the section count and elapsed worker time above; player order rotates between budget windows. The client inventory worker limits itself to 32 section hashes and 20 ms of hashing per second, allowing an already-started section to finish. Increase server budgets only when the CPU and desired initial download speed permit it.
 
-Cache inventories use acknowledged pages of at most 128 entries, with one page in flight per client. The server processes at most one page every five ticks across all players. A late page remains valid after the initial streaming grace period, and retries do not require rehashing that page. This bounds queued work without requiring a large inventory to finish in three seconds. Inventory refreshes are triggered by movement or radius changes and respect `manifestRefreshIntervalTicks`.
+Cache inventories use acknowledged pages of at most 128 entries, with one page in flight per client. Protocol 4 adds the server-captured center and radius to the session and an explicit abort status to page acknowledgements. Pages are numbered from zero within each request. Client scans and server validation use that same frozen dimension/range, even if the player moves. This wire change requires updating both sides.
+
+`PART` pages stage claims without changing confirmed hashes. A contiguous, valid `COMPLETE` atomically replaces confirmations inside that range, updates changed hashes, and removes confirmations for absent client sections. Confirmations outside the range and in other dimensions remain valid. This only changes server verification state; it never deletes client terrain. Identical duplicate pages are idempotent while staging; after commit only the final COMPLETE receipt is retained for ACK-loss retries, releasing the staged page arrays. Conflicting duplicates abort, and gaps require retry. Superseded requests cannot commit.
+
+Sections touched by deliveries overlapping a snapshot are conservatively re-sent rather than trusted from that snapshot. At commit, old overlapping batch confirmations are fenced; their late ACKs release resources and may still confirm sections outside the snapshot range. Queued superseded batches are rejected before transmission. Queue selection, token charging and sending are serialized with snapshot publication so an old queued payload cannot overtake its replacement.
+
+The server processes at most one inventory page every five ticks globally. The initial streaming gate opens after 60 ticks while the transaction may continue. No-progress expiry is 2,400 ticks, absolute expiry is 12,000 ticks, staging is capped at 65,536 unique entries and 1,024 pages, and the client retries a page every 200 ticks and stops after eight failed retry opportunities. Partial pages are flushed after about two seconds of hash work so a slow inventory need not fill 128 entries before reporting progress. Failure, cancellation or expiry discards staging, invalidates uncertain confirmations only within the frozen scope, and resumes scanning. Movement/radius refreshes respect `manifestRefreshIntervalTicks` and wait for the current transaction to finish or expire. These caps may prevent very large inventories from completing; correctness then falls back to scoped re-transmission.
+
+Outbound queues enforce both 128 packets and 8 MiB for every priority. Oversized packets are rejected before eviction. High-priority admissions may evict the newest normal packets but protect the oldest normal packet; admission is rejected if the remaining queue still exceeds either cap. When no normal packet is queued, one normal admission may evict newest high-priority packets to ensure background progress. After eight high-priority dequeues, a waiting normal packet gets a turn. Callers fail all evicted/rejected batches and retain their sections for bounded retry.
+
+An exhausted base scanner still admits released paced work and dirty work; dirty work is polled first. Unreleased paced work does not wake an exhausted scan until its release tick. Candidate, acquire, hash-budget and bandwidth deferrals remain recoverable without waiting for the full idle rescan interval.
 
 A world UUID namespaces sidecars, and every new stream session has a fresh unpredictable epoch. Epochs are compared for equality, not by age, so restoring an old backup cannot make old counters appear current. New sessions discard prior verification state while retaining local LOD content for comparison. Matching content is reused; differing content can replace newer client terrain with older server terrain.
 
@@ -168,6 +180,21 @@ If only Minecraft region files were restored, the old server LOD database may st
 ### regression checks
 
 `./gradlew check` runs the standalone network, synchronization, pacing, region-state and bandwidth suites with assertions enabled. `./gradlew runRegressionTests` runs them explicitly. The dependency-free semantic hashing, rollback identity, and cache-budget tests can also run with JDK 25 using `./scripts/test-semantic-sync.sh`.
+
+### v1.2.5 correctness follow-up (development branch)
+
+The fixes are based on published tag `v1.2.5` (`4deea7a`), which remains unchanged. Development artifacts are `1.2.6-dev`, protocol 4; no replacement release is published by these fixes.
+
+| Area | Previous behavior | Corrected behavior / files |
+|------|-------------------|----------------------------|
+| Inventory | Incremental insert-if-absent claims; moving validation range; old ACK overwrite | Staged scoped transactions and scoped ACK fencing in `PlayerLodTracker`, `LodStreamingService`, `ClientLodSettings`, `ClientLodReceiver` and the session/page ACK payloads |
+| Queue | High-priority bytes could exceed the cap | Final admission checks, bounded eviction and normal progress in `PlayerOutboundQueue`; failed batch recovery in the tracker and streaming service |
+| Configuration | Startup applied/saved unchecked values | Shared validation in `VoxyServerConfig` and the command application boundary |
+| Deferred work | Exhausted scans could wait 1,200 ticks despite ready paced work | `prepareScanWork` admits eligible deferred work; a full paced queue retains the next scan key |
+
+Validation passed all **10/10** suites with `./gradlew build check runRegressionTests` and the standalone semantic script, including full JAR/source packaging, real Minecraft registry semantics, 100 concurrent old-ACK/snapshot races, concurrent queue accounting, a 256-player/512-page inventory simulation at the global five-tick page cadence, and a 64-player component simulation with 400 ticks and 76,800 admissions at 20,000 bytes/sec/player. The load simulation uses a deliberately smaller 24 KiB queue limit to force saturation; it checks every admission/dequeue/cleanup against both caps and verifies all outstanding resources return to zero. The recorded saturated run sent/ACKed 6,208 batches, failed 70,208 admissions/evictions through recovery, and drained the remaining 384 batches during cleanup. These counts describe the synthetic workload, not network or TPS measurements. Regression coverage includes H1-to-H2 refresh, scoped absence, duplicate/conflicting/gapped pages, stale requests/ACKs, failure and both expiry deadlines, configuration boundaries, and tick-2 paced recovery. These are component tests: no real Minecraft client/server session, render correctness, native-ingest race under live play, sustained TPS or production bandwidth savings has been validated.
+
+Enable `debugTrackingEnabled` for server hash/cache/skip/send totals and per-player transaction duration/completion tick, staged entries, ACK timeouts, delivery failures/retries, dirty enqueue-to-ACK recovery ticks, and queue occupancy/peak/evictions/rejections. Delivery failure rate includes local rejection/eviction, not only negative client ACKs. Client manifest logs record scanned sections, hashes, hash milliseconds, total build time and completion status. Metrics are process-local diagnostics, not persisted analytics.
 
 ### client config
 

@@ -15,7 +15,29 @@ public class DistancePacingTest {
         testCandidateSequenceDecoupling();
         testMultiTickDeferredSectionRecovery();
         testPlayerScanGeometryReset();
+        testExhaustedDeferredRecovery();
         System.out.println("[PASS] DistancePacingTest completed successfully.\n");
+    }
+
+    private static void testExhaustedDeferredRecovery() {
+        var tracker = new PlayerLodTracker();
+        assert tracker.prepareScanWork(0, 0, 0, 0, 1, 0, 1200);
+        long key = tracker.nextSectionKeyToScan(0, 1200);
+        assert tracker.nextSectionKeyToScan(0, 1200) == PlayerLodTracker.NO_SECTION_KEY;
+        tracker.deferPacedSection(key, key, 0);
+        assert !tracker.prepareScanWork(0, 0, 0, 0, 1, 1, 1200) : "unreleased paced work must not spin";
+        tracker.deferDirtySection(77, 77, 1);
+        assert tracker.prepareScanWork(0, 0, 0, 0, 1, 1, 1200) : "dirty work cannot wait for idle rescan";
+        assert tracker.pollDeferredDirtySection() == 77 : "dirty work must precede pacing";
+        assert tracker.pollDeferredPacedSection(1) == PlayerLodTracker.NO_SECTION_KEY;
+        assert tracker.prepareScanWork(0, 0, 0, 0, 1, 2, 1200) : "released work waited 1200 ticks";
+        assert tracker.pollDeferredPacedSection(2) == key;
+        assert !tracker.prepareScanWork(0, 0, 0, 0, 1, 3, 1200) : "exhausted empty scanner spun";
+        // A hash-budget deferral remains eligible even with the base scanner exhausted.
+        tracker.deferDirtySection(key, key, 4);
+        assert tracker.prepareScanWork(0, 0, 0, 0, 1, 4, 1200);
+        assert tracker.pollDeferredDirtySection() == key;
+        System.out.println("  ✓ testExhaustedDeferredRecovery (release at tick 2, no idle rescan or empty busy loop)");
     }
 
     private static void testDistanceBoundaries() {

@@ -32,13 +32,23 @@ public class PlayerOutboundQueue {
 
     private final ArrayDeque<QueuedPacket> highPriorityQueue = new ArrayDeque<>();
     private final ArrayDeque<QueuedPacket> normalQueue = new ArrayDeque<>();
+    private final int packetLimit;
+    private final long byteLimit;
+    public PlayerOutboundQueue() { this(MAX_QUEUED_PACKETS, MAX_QUEUED_BYTES); }
+    public PlayerOutboundQueue(int packetLimit, long byteLimit) {
+        if (packetLimit < 1 || packetLimit > MAX_QUEUED_PACKETS || byteLimit < 1 || byteLimit > MAX_QUEUED_BYTES)
+            throw new IllegalArgumentException("invalid outbound queue limits");
+        this.packetLimit = packetLimit; this.byteLimit = byteLimit;
+    }
     private long totalQueuedBytes = 0L;
-    private long droppedNormalPackets = 0L;
+    private long droppedPackets = 0L;
+    private long evictedPackets, rejectedPackets, peakBytes;
+    private int highBurst;
     private long totalTransmittedBytes = 0L;
     private long totalTransmittedPackets = 0L;
 
     /**
-     * Enqueues a packet. If normal scan packets must be evicted to make room, they are returned in evictedOut.
+     * Enqueues within both hard caps. Every eviction is returned for batch failure/recovery.
      *
      * @param packet the packet to enqueue
      * @param evictedOut optional list to collect evicted packets so the tracker can fail their batches
@@ -48,61 +58,50 @@ public class PlayerOutboundQueue {
         if (packet == null) return false;
         int size = packet.byteSize();
 
+        if (size <= 0 || size > byteLimit) { rejectedPackets++; droppedPackets++; return false; }
         if (packet.highPriority()) {
-            // Evict lowest priority scan packets to make room for high priority updates
-            while ((highPriorityQueue.size() + normalQueue.size() >= MAX_QUEUED_PACKETS
-                    || totalQueuedBytes + size > MAX_QUEUED_BYTES) && !normalQueue.isEmpty()) {
-                QueuedPacket evicted = normalQueue.pollFirst();
-                if (evicted != null) {
-                    totalQueuedBytes -= evicted.byteSize();
-                    droppedNormalPackets++;
-                    if (evictedOut != null) evictedOut.add(evicted);
-                }
-            }
-            if (highPriorityQueue.size() >= MAX_QUEUED_PACKETS) {
-                QueuedPacket evicted = highPriorityQueue.pollFirst();
-                if (evicted != null) {
-                    totalQueuedBytes -= evicted.byteSize();
-                    droppedNormalPackets++;
-                    if (evictedOut != null) evictedOut.add(evicted);
-                }
-            }
-            highPriorityQueue.addLast(packet);
-            totalQueuedBytes += size;
-            return true;
-        } else {
-            // Normal scan packet: reject if queue is saturated
-            if (highPriorityQueue.size() + normalQueue.size() >= MAX_QUEUED_PACKETS
-                    || totalQueuedBytes + size > MAX_QUEUED_BYTES) {
-                droppedNormalPackets++;
-                return false;
-            }
-            normalQueue.addLast(packet);
-            totalQueuedBytes += size;
-            return true;
+            // Retain the oldest normal packet so a sustained update stream cannot evict it forever.
+            while (wouldOverflow(size) && normalQueue.size() > 1) evict(normalQueue.pollLast(), evictedOut);
+        } else if (normalQueue.isEmpty()) {
+            // Reserve progress for one background packet even under continuous dirty traffic.
+            while (wouldOverflow(size) && !highPriorityQueue.isEmpty()) evict(highPriorityQueue.pollLast(), evictedOut);
         }
+        if (wouldOverflow(size)) { rejectedPackets++; droppedPackets++; return false; }
+        (packet.highPriority() ? highPriorityQueue : normalQueue).addLast(packet);
+        totalQueuedBytes += size;
+        peakBytes = Math.max(peakBytes, totalQueuedBytes);
+        return true;
+    }
+
+    private boolean wouldOverflow(int size) {
+        return highPriorityQueue.size() + normalQueue.size() >= packetLimit
+                || totalQueuedBytes + size > byteLimit;
+    }
+    private void evict(QueuedPacket packet, List<QueuedPacket> evictedOut) {
+        totalQueuedBytes -= packet.byteSize();
+        droppedPackets++; evictedPackets++;
+        if (evictedOut != null) evictedOut.add(packet);
     }
 
     public synchronized QueuedPacket peekNext() {
-        if (!highPriorityQueue.isEmpty()) {
-            return highPriorityQueue.peekFirst();
-        }
-        return normalQueue.peekFirst();
+        return !normalQueue.isEmpty() && (highPriorityQueue.isEmpty() || highBurst >= 8)
+                ? normalQueue.peekFirst() : highPriorityQueue.peekFirst();
     }
 
     public synchronized QueuedPacket pollNext() {
-        QueuedPacket pkt = null;
-        if (!highPriorityQueue.isEmpty()) {
-            pkt = highPriorityQueue.pollFirst();
-        } else if (!normalQueue.isEmpty()) {
-            pkt = normalQueue.pollFirst();
-        }
-        if (pkt != null) {
-            totalQueuedBytes -= pkt.byteSize();
-            totalTransmittedBytes += pkt.byteSize();
-            totalTransmittedPackets++;
-        }
-        return pkt;
+        QueuedPacket packet = peekNext();
+        if (packet == null) return null;
+        if (packet == highPriorityQueue.peekFirst()) { highPriorityQueue.removeFirst(); highBurst = Math.min(8, highBurst + 1); }
+        else { normalQueue.removeFirst(); highBurst = 0; }
+        totalQueuedBytes -= packet.byteSize();
+        totalTransmittedBytes += packet.byteSize();
+        totalTransmittedPackets++;
+        return packet;
+    }
+
+    public record Stats(int packets, long bytes, long peakBytes, long evicted, long rejected) {}
+    public synchronized Stats stats() {
+        return new Stats(getQueuedPacketCount(), totalQueuedBytes, peakBytes, evictedPackets, rejectedPackets);
     }
 
     public synchronized List<QueuedPacket> clearAndDrain() {
@@ -112,6 +111,7 @@ public class PlayerOutboundQueue {
         highPriorityQueue.clear();
         normalQueue.clear();
         totalQueuedBytes = 0L;
+        highBurst = 0;
         return drained;
     }
 
@@ -119,6 +119,7 @@ public class PlayerOutboundQueue {
         highPriorityQueue.clear();
         normalQueue.clear();
         totalQueuedBytes = 0L;
+        highBurst = 0;
     }
 
     public synchronized List<QueuedPacket> clearDimension(Identifier dim) {
@@ -150,7 +151,7 @@ public class PlayerOutboundQueue {
     }
 
     public synchronized long getDroppedCount() {
-        return droppedNormalPackets;
+        return droppedPackets;
     }
 
     public synchronized long getTotalTransmittedBytes() {

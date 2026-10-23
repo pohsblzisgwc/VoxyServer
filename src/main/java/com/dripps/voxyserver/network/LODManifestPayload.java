@@ -23,7 +23,7 @@ public record LODManifestPayload(
     public static final int CANCELED = 3;
 
     public static final Type<LODManifestPayload> TYPE =
-            new Type<>(Identifier.parse("voxyserver:lod_manifest_v3"));
+            new Type<>(Identifier.parse("voxyserver:lod_manifest_v4"));
 
     public static final StreamCodec<RegistryFriendlyByteBuf, LODManifestPayload> CODEC =
             StreamCodec.of(LODManifestPayload::write, LODManifestPayload::read);

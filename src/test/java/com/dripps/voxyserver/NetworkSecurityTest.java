@@ -243,13 +243,15 @@ public class NetworkSecurityTest {
         boolean applied = tracker.applyManifestBatch(dim, session.streamEpoch(), session.manifestRequestId(), 0, keys, hashes);
         assert applied : "Manifest batch should be applied";
 
+        assert !tracker.hasSent(10L, 111L) : "PART must not publish claims";
+        assert tracker.completeManifest(dim, session.streamEpoch(), session.manifestRequestId());
         assert tracker.hasSent(10L, 111L) : "Tracker should recognize acknowledged section 10L";
         assert tracker.hasSent(20L, 222L) : "Tracker should recognize acknowledged section 20L";
         assert !tracker.hasSent(30L, 333L) : "Tracker should not recognize un-manifested section";
 
         assert !tracker.isManifestGated(dim, 101L) : "initial grace should expire";
-        assert tracker.applyManifestBatch(dim, session.streamEpoch(), session.manifestRequestId(),
-                0, new long[]{30L}, new long[]{333L}) : "a late bounded page must remain valid after grace";
+        assert !tracker.applyManifestBatch(dim, session.streamEpoch(), session.manifestRequestId(),
+                0, new long[]{30L}, new long[]{333L}) : "a completed transaction must not accept new pages";
         var next = tracker.beginSession(dim, true, 200L);
         assert next.streamEpoch() != session.streamEpoch() : "new session must not reuse an old epoch";
         assert !tracker.hasSent(10L, 111L) : "a new server state must not inherit verified content";

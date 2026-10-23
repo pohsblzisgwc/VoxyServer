@@ -32,7 +32,11 @@ public final class SynchronizationProtocolTest {
             var decodedAck = LODManifestAckPayload.CODEC.decode(buf);
             require(!decodedAck.retry() && decodedAck.pageId() == 513L, "ACK status changed");
             raw.clear();
-            var session = new LODStreamSessionPayload(dimension, 123L, 9L, true, UUID.randomUUID(), SemanticSectionHash.VERSION);
+            var aborted = new LODManifestAckPayload(dimension, 123L, 9L, 513L, LODManifestAckPayload.ABORT);
+            LODManifestAckPayload.CODEC.encode(buf, aborted);
+            require(LODManifestAckPayload.CODEC.decode(buf).aborted(), "abort ACK status changed");
+            raw.clear();
+            var session = new LODStreamSessionPayload(dimension, 123L, 9L, true, UUID.randomUUID(), SemanticSectionHash.VERSION, new com.dripps.voxyserver.network.ManifestScope(-123, 456, 17));
             LODStreamSessionPayload.CODEC.encode(buf, session);
             require(session.equals(LODStreamSessionPayload.CODEC.decode(buf)), "world/hash namespace did not round-trip");
             raw.clear();
@@ -45,7 +49,10 @@ public final class SynchronizationProtocolTest {
         } finally { raw.release(); }
         invalid(() -> new LODManifestPayload(dimension, 1, 1, keys, hashes, 0, -1));
         invalid(() -> new LODManifestAckPayload(dimension, 1, 1, -1, false));
-        invalid(() -> new LODStreamSessionPayload(dimension, 1, 1, true, UUID.randomUUID(), -1));
+        invalid(() -> new LODManifestAckPayload(dimension, 1, 1, 0, 3));
+        invalid(() -> new com.dripps.voxyserver.network.ManifestScope(0, 0, -1));
+        invalid(() -> new com.dripps.voxyserver.network.ManifestScope(0, 0, 2049));
+        invalid(() -> new LODStreamSessionPayload(dimension, 1, 1, true, UUID.randomUUID(), -1, new com.dripps.voxyserver.network.ManifestScope(0, 0, 0)));
         System.out.println("PASS SynchronizationProtocolTest: pages, ACKs, namespaces, truncation and identity bounds");
     }
 

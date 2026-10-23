@@ -69,6 +69,7 @@ public class Voxyserver implements ModInitializer {
     }
 
     public List<String> applyConfigFromCommand(VoxyServerConfig candidate) {
+        candidate.requireValid();
         List<String> notes = applyConfigChanges(config, candidate);
         config = candidate;
         candidate.save();
