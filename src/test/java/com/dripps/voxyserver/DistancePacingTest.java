@@ -37,6 +37,17 @@ public class DistancePacingTest {
         tracker.deferDirtySection(key, key, 4);
         assert tracker.prepareScanWork(0, 0, 0, 0, 1, 4, 1200);
         assert tracker.pollDeferredDirtySection() == key;
+        var saturated = new PlayerLodTracker();
+        assert saturated.prepareScanWork(0, 0, 0, 0, 1, 0, 1200);
+        saturated.nextSectionKeyToScan(0, 1200);
+        assert saturated.nextSectionKeyToScan(0, 1200) == PlayerLodTracker.NO_SECTION_KEY;
+        for (int i = 0; i < 4096; i++) assert saturated.deferPacedSection(i, i, 98);
+        assert !saturated.deferPacedSection(9000, 9000, 98) : "saturated pacing must retain a scan checkpoint";
+        assert saturated.prepareScanWork(0, 0, 0, 0, 1, 99, 1200) : "retained checkpoint was hidden by exhaustion";
+        assert saturated.pollDeferredPacedSection(99) == PlayerLodTracker.NO_SECTION_KEY;
+        assert saturated.nextSectionKeyToScan(99, 1200) == 9000 : "retained scan candidate lost";
+        assert !saturated.prepareScanWork(0, 0, 0, 0, 1, 99, 1200) : "consumed checkpoint must not spin";
+        assert saturated.prepareScanWork(0, 0, 0, 0, 1, 100, 1200) : "full paced queue did not release";
         System.out.println("  ✓ testExhaustedDeferredRecovery (release at tick 2, no idle rescan or empty busy loop)");
     }
 

@@ -398,6 +398,7 @@ public class PlayerLodTracker {
     }
 
     public synchronized boolean hasReadyDeferredWork(long tick) {
+        if (heldScanKey != NO_SECTION_KEY) return true;
         for (long key : deferredDirtySections.keySet()) if (!sectionOwners.containsKey(key)) return true;
         for (var entry : deferredPacedSections.entrySet())
             if (entry.getValue().releaseTick <= tick && !sectionOwners.containsKey(entry.getKey())) return true;
