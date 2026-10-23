@@ -10,7 +10,7 @@ import net.minecraft.resources.Identifier;
 // wraps preserialized LODBulkPayload bytes so the heavy encoding
 // happens on the streaming thread instead of the tick thread
 public record PreSerializedLodPayload(long streamEpoch, long batchId, int sectionCount,
-                                      byte[] data) implements CustomPacketPayload {
+                                      byte[] data, long demandGroup, long demandRequestId) implements CustomPacketPayload {
 
     public static final int MAX_ENCODED_BYTES = 8 * 1024 * 1024;
     public static final int MAX_SECTIONS = 16;
@@ -21,7 +21,13 @@ public record PreSerializedLodPayload(long streamEpoch, long batchId, int sectio
     public static final StreamCodec<RegistryFriendlyByteBuf, PreSerializedLodPayload> CODEC =
             StreamCodec.of(PreSerializedLodPayload::write, PreSerializedLodPayload::read);
 
+    public PreSerializedLodPayload(long epoch, long batch, int count, byte[] data) {
+        this(epoch, batch, count, data, 0, 0);
+    }
+
     public PreSerializedLodPayload {
+        if (demandRequestId < 0 || (demandRequestId != 0 && !com.dripps.voxyserver.sync.DemandGroup.validGroup(demandGroup)))
+            throw new IllegalArgumentException("invalid demand delivery");
         if (data == null) {
             throw new IllegalArgumentException("data cannot be null");
         }
@@ -32,6 +38,8 @@ public record PreSerializedLodPayload(long streamEpoch, long batchId, int sectio
         validate(payload.streamEpoch, payload.batchId, payload.sectionCount, payload.data.length);
         buf.writeVarLong(payload.streamEpoch);
         buf.writeVarLong(payload.batchId);
+        buf.writeLong(payload.demandGroup);
+        buf.writeVarLong(payload.demandRequestId);
         buf.writeVarInt(payload.sectionCount);
         buf.writeVarInt(payload.data.length);
         buf.writeBytes(payload.data);
@@ -40,6 +48,8 @@ public record PreSerializedLodPayload(long streamEpoch, long batchId, int sectio
     private static PreSerializedLodPayload read(RegistryFriendlyByteBuf buf) {
         long streamEpoch = buf.readVarLong();
         long batchId = buf.readVarLong();
+        long demandGroup = buf.readLong();
+        long demandRequestId = buf.readVarLong();
         int sectionCount = buf.readVarInt();
         int len = buf.readVarInt();
         validate(streamEpoch, batchId, sectionCount, len);
@@ -48,7 +58,7 @@ public record PreSerializedLodPayload(long streamEpoch, long batchId, int sectio
         }
         byte[] data = new byte[len];
         buf.readBytes(data);
-        return new PreSerializedLodPayload(streamEpoch, batchId, sectionCount, data);
+        return new PreSerializedLodPayload(streamEpoch, batchId, sectionCount, data, demandGroup, demandRequestId);
     }
 
     // encodes an LODBulkPayload to preserialized bytes on the calling thread
@@ -70,7 +80,11 @@ public record PreSerializedLodPayload(long streamEpoch, long batchId, int sectio
 
     public PreSerializedLodPayload withDelivery(long streamEpoch, long batchId) {
         validate(streamEpoch, batchId, this.sectionCount, this.data.length);
-        return new PreSerializedLodPayload(streamEpoch, batchId, this.sectionCount, this.data);
+        return new PreSerializedLodPayload(streamEpoch, batchId, this.sectionCount, this.data, demandGroup, demandRequestId);
+    }
+
+    public PreSerializedLodPayload withDemand(long group, long request) {
+        return new PreSerializedLodPayload(streamEpoch, batchId, sectionCount, data, group, request);
     }
 
     public LODBulkPayload decodeBulk(RegistryAccess registryAccess) {

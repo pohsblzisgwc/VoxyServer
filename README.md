@@ -1,18 +1,23 @@
 # voxyserver
 
-a fabric server side mod that voxelizes chunks into LODs using [voxy](https://github.com/MCRcortex/voxy) and streams them to connected clients. players with voxy installed will receive LOD data from the server automatically, no client side world scanning/loading needed.
+a fabric server side mod that voxelizes chunks into LODs using [voxy](https://github.com/MCRcortex/voxy) and streams them to connected clients. players with voxy installed will receive LOD data from the server automatically, the client reports its active render nodes; no world-wide scan is required.
 
 **Latest: minecraft 26.3 | fabric**
 
 ## how it works
 
-when chunks load on the server, they get voxelized into voxy's LOD format and stored in a per world database. when a player with voxy connects, the server streams LOD sections to them in a spiral outward from their position. as the player moves, new sections are sent automatically.
+The development branch uses **protocol 5** on Fabric / Minecraft 26.3. Both sides must update together. Published `v1.2.5` (`4deea7a`) is unchanged; development artifacts remain `1.2.6-dev`.
 
-block changes (building, explosions, etc) are detected and the affected LOD sections are revoxelized and pushed to clients automatically.
+The client derives demand from Voxy's actual render subscriptions at native LOD levels **0–4**. Each node contains 32³ voxels and spans `32 << level` blocks. Voxy's `sectionRenderDistance` uses **512-block top-level units**: values 16 and 32 mean 512 and 1024 Minecraft chunks. The remote range is capped by the native view, personal preference and server maximum. The server validates the requested coordinates, dimension, epoch and rate without enumerating the view grid or the database.
 
-existing worlds can also be backfilled from their region files with an admin command, so already explored terrain can be voxelized without needing players to revisit it chunk by chunk.
+1. Client compares one semantic digest and coverage mask per fixed 4×4×4 group **at the same LOD**.
+2. When that group differs, client supplies hashes only for its server-present leaves. The server sends only differing/missing native nodes. Native child topology participates in the proof; a coarse voxel hash is never treated as a digest of its finer descendants.
+3. Stable groups audit again after a randomized **150–210 seconds**. Newly watched nodes and changed groups start earlier. One client proof worker reads actual local data, with round-robin groups and bounded hashing; a second worker ingests received data. Native Voxy ingestion remains enabled.
+4. A single server maintenance worker coalesces source changes, updates native LODs and fills a shared on-demand hash index. Block/light/biome notifications only mark source bits. There is no startup world enumeration, player spiral scanner, automatic full import or per-block hash computation.
 
-players without voxy are unaffected.
+Clients are **overwrite-only**. A real server node, including an explicitly stored all-air node, may replace that same native node. Missing or unreadable server nodes never clear local terrain. Coarse updates preserve independently cached finer nodes and child references. The server's absence is not synthesized as an all-air replacement, including when Voxy returns a cached missing-node placeholder.
+
+Players without the matching mod/protocol receive no LOD stream. Existing worlds can still be backfilled through the explicit admin import commands below.
 
 ## building
 
@@ -90,111 +95,94 @@ config file is generated at `config/voxyserver.json` on first run.
 
 | option | default | description |
 |--------|---------|-------------|
-| `lodStreamRadius` | `1024` | radius in chunks to stream LODs around each player |
-| `maxSectionsPerTickPerPlayer` | `100` | max LOD sections sent per player per tick cycle |
-| `sectionsPerPacket` | `50` | max LOD sections bundled into a single network packet |
-| `maxBandwidthBytesPerSec` | `250000` | token-bucket egress rate limit in bytes/sec per player (`0` = unlimited) |
-| `enableDistancePacing` | `true` | paces candidate selection by distance to prevent bandwidth spikes |
-| `enableRegionHashSync` | `false` | reserved region summaries; partial coverage never suppresses section delivery; leave disabled |
-| `hashSyncEnabled` | `true` | reuse client content after semantic hash comparison; bounded inventory reconciliation remains active when disabled |
-| `hashWorkIntervalTicks` | `20` | interval for the shared server hash budget, in server ticks |
-| `maxHashComputationsPerInterval` | `64` | maximum new section hashes per interval across all players |
-| `maxHashMillisPerInterval` | `10` | worker time budget for new section hashing per interval; a section already started finishes |
-| `hashRecheckIntervalTicks` | `1200` | recheck unchanged cached fingerprints after this many ticks; edits invalidate immediately |
-| `manifestRefreshIntervalTicks` | `600` | minimum interval between movement/radius-triggered cache inventory refreshes |
-| `tickInterval` | `5` | server ticks between each streaming cycle |
-| `workerThreads` | `3` | number of worker threads for voxy to use |
-| `generateOnChunkLoad` | `true` | voxelize chunks as they load on the server |
-| `dirtyTrackingEnabled` | `true` | revoxelize and push LODs when blocks change |
-| `dirtyTrackingInterval` | `40` | ticks between dirty chunk flushes (40 = 2 seconds) |
-| `debugTrackingEnabled` | `false` | output internal server stats to the console periodically |
-| `debugTrackingInterval` | `200` | ticks between dumping tracking stats (200 = 10 seconds) |
+| `maxClientVoxyRadius` / `lodStreamRadius` | `1024` | maximum remote radius in Minecraft chunks; validated legacy aliases |
+| `maxSectionsPerTickPerPlayer` | `100` | per-player send limit, further capped by client preference |
+| `sectionsPerPacket` | `16` | native nodes per packet; the wire hard cap remains 16 |
+| `maxBandwidthBytesPerSec` | `250000` | per-player token bucket, `0` = unlimited |
+| `hashSyncEnabled` | `true` | reuse semantic matches; disabling it still preserves absence and protocol limits |
+| `maintenanceMillisPerSecond` | `20` | global worker wall-time allowance per second, including proofs, source conversion, hashing and packet encoding |
+| `maintenanceQuietMillis` | `2000` | coalesce changes until a source root is quiet; continuous changes also release after at most 30 seconds, plus queue delay |
+| `maintenanceCooldownMillis` | `10000` | minimum repeat-update interval for a 32³ L0 node |
+| `maxDemandRequestsPerSecond` | `20` | accepted requests per player per nominal server second |
+| `hashWorkIntervalTicks` | `20` | shared hash allowance window, in nominal 50 ms units |
+| `maxHashComputationsPerInterval` | `64` | new node hash limit across all players |
+| `maxHashMillisPerInterval` | `10` | additional hashing time allowance inside the overall maintenance allowance |
+| `workerThreads` | `3` | Voxy storage/service workers; the maintenance scheduler itself uses one thread |
+| `generateOnChunkLoad` | `true` | enqueue loaded source sections for background ingestion |
+| `generateOnChunkUnload` | `true` | enqueue final source updates, using vanilla pending-save reads without loading chunks |
+| `dirtyTrackingEnabled` | `true` | enqueue actual block, light and biome changes |
+| `debugTrackingEnabled` | `false` | log maintenance/hash/cache/proof/delivery and queue diagnostics |
+| `debugTrackingInterval` | `200` | server ticks between diagnostic reports |
 
-### example config
+Old `tickInterval`, `dirtyTrackingInterval`, `enableDistancePacing`, `enableRegionHashSync`, `hashRecheckIntervalTicks` and `manifestRefreshIntervalTicks` fields remain accepted and validated for configuration compatibility. Protocol 5 uses client render demand, native LOD selection and the maintenance settings above instead of those scanner/inventory schedules.
 
-```json
-{
-  "lodStreamRadius": 1024,
-  "maxSectionsPerTickPerPlayer": 100,
-  "sectionsPerPacket": 50,
-  "maxBandwidthBytesPerSec": 250000,
-  "enableDistancePacing": true,
-  "enableRegionHashSync": false,
-  "hashSyncEnabled": true,
-  "hashWorkIntervalTicks": 20,
-  "maxHashComputationsPerInterval": 64,
-  "maxHashMillisPerInterval": 10,
-  "hashRecheckIntervalTicks": 1200,
-  "manifestRefreshIntervalTicks": 600,
-  "generateOnChunkLoad": true,
-  "tickInterval": 5,
-  "workerThreads": 3,
-  "dirtyTrackingEnabled": true,
-  "dirtyTrackingInterval": 40,
-  "debugTrackingEnabled": false,
-  "debugTrackingInterval": 200
-}
+Configuration is validated before application or saving. Invalid startup files produce field-specific diagnostics and use validated defaults without overwriting the file. Invalid reloads retain the current validated configuration; commands and saves use the same validation guard. Changing chunk lifecycle generation flags or enabling/disabling dirty tracking still requires a restart.
+
+### maintenance and memory
+
+Each 512³ source root allocates up to 4 KiB of bits for changed 16³ source sections. Repeated redstone changes set the same bit. The worker groups ready sections by their containing 32³ native node and converts only the marked source octants. Notifications hold a short per-root lock; scanning cooldowns, journal writes, palette copying, conversion and semantic hashes run outside that lock and outside the Minecraft tick thread.
+
+For live sources, the main thread performs at most four direct chunk lookups and eight section-reference/light captures per work item. Palette copies run on the maintenance worker under short section-local writer monitors. Unloaded sources use vanilla targeted chunk I/O; missing saves retry instead of inventing replacement data. This is asynchronous maintenance, not a claim of zero main-thread work or zero lock contention.
+
+The index holds at most **65,536 node fingerprints**, **128 encoded node snapshots**, and **8,192 pending probes**, shared between players. It starts empty and verifies only requested native nodes after restart; it is not a persistent full-world index. Cold edits do not fill the index. Native updates invalidate affected cached fingerprints and negative-presence entries; unchanged group requests reuse them. Missing-node lookups use the overall I/O/time allowance without consuming the semantic-hash count limit. Source processing and hashing rotate so one cannot permanently starve the other. Request admission is capped at 256 pending requests globally and four per player, with round-robin service. Each player can subscribe to at most 1,024 groups; the client tracks at most 65,536 active native nodes.
+
+Dirty work, including the active item, is journaled about every 30 seconds and on a clean stop. Startup merges it with newly loaded source work. A crash can lose the latest uncheckpointed dirty window, and Voxy's asynchronous storage writes are not a world-wide atomic checkpoint. Normal chunk loads queue source verification again. Existing loaded chunks may therefore incur bounded repeated ingestion after reconnect/reload; this implementation does not persist per-source freshness stamps or scan/rebuild the whole map.
+
+A nonpreemptible node/source operation may finish beyond the configured worker allowance; that allowance is not a hard CPU/TPS guarantee. Main-thread captures, Voxy's own compression/save workers, manual imports and periodic journal/lease metadata are additional costs. Debug logs expose worker CPU/wall time, maximum work quantum, main capture time, hashes/cache hits, matched groups, actual sends, retries/ACK timeouts and per-player queue peaks/rejections/evictions. Saturated budgets delay convergence rather than moving heavy work onto the main thread.
+
+### proof and delivery state
+
+Before: the server enumerated a full-resolution view grid and reconciled paged client inventories; moving or exhausted scans could create substantial repeated work. The retained v4 transaction/pacing regression fixtures protect those earlier correctness fixes, but the production protocol no longer starts those scans or inventory transactions.
+
+Now: `render watch → bounded SUMMARY → DIFFERENT → bounded DETAIL → changed native nodes → guarded installation → batch ACK`. Each group is a complete snapshot of a fixed native LOD, wanted-node mask, dimension, epoch and request ID. An incomplete server index returns `PENDING`, which is never equality evidence. Server-present coverage and all node revisions must match the first proof before detail acceptance and again before batch enqueue. Duplicate detail does not resurrect already confirmed work. Keys outside the requested group remain independent.
+
+Packets carry the group/request ID as well as epoch/batch ID. A client lease serializes proof replacement with actual native writes. Superseded or canceled data is rejected before installation; old ACKs release resources without confirming replaced content. Idle completed proofs still accept server invalidation notifications. Client-only data is hashed from storage, not trusted from a sidecar. Fingerprints describe namespaced block states and sorted properties, biomes, light, voxel positions and child topology; runtime mapper/registry IDs, palette order and binary compression are not identity.
+
+SUMMARY and DETAIL retry at bounded intervals (2 and 5 seconds), at most 16 attempts per phase. Missing deliveries expire after 30 seconds; a later bounded proof can recover. Negative/overflow ACKs and rejected/evicted sends release credits and back off; the server invalidates the proof after eight delivery failures. Requests from prior epochs/IDs cannot advance a replacement proof. Cancellation and a ten-minute subscription lease release stale interests; canceled/expired request tombstones are bounded. A fresh epoch handles dimension switches and reconnects while retaining active client renderer interests and cached terrain.
+
+Outbound queues retain the earlier strict **128-packet / 8 MiB** caps for both priorities, oversize rejection, eviction recovery and bounded high-priority bursts. Changed-group replacements receive priority; the oldest normal packet is protected and gets a turn after eight high-priority dequeues. Inbound reservations remain limited to **64 batches / 64 MiB**, including queued and processing batches.
+
+| Change | Production files | Behavior |
+|--------|------------------|----------|
+| Client-driven two-stage demand | `ClientDemand`, `ClientDemandState`, `DemandGroup`, demand payloads, renderer mixins, `LodStreamingService` | Actual native LOD demand replaces the server grid scan; stable groups use low-frequency summaries |
+| Shared async index/source maintenance | `DemandIndex`, `SourceMaintenance`, `DirtyRegionQueue`, block/light/biome mixins | Coalesced source work and shared semantic proofs run under bounded worker budgets |
+| Stale proof/data/ACK isolation | `DemandProofState`, `DemandLease`, `PreSerializedLodPayload`, `PlayerLodTracker`, `RemoteIngestService` | Complete scoped proofs and per-request installation fencing; recoverable resource release |
+| Overwrite-only native storage | `NativeNodeInstaller`, `SectionDataAccess`, native presence mixins | Same-LOD replacement retains local descendants; missing/unreadable placeholders are excluded |
+| Queue/config/deferred correctness | `PlayerOutboundQueue`, `VoxyServerConfig`, retained tracker regressions | Earlier caps, validation and recovery fixes remain covered; new failures do not leak legacy scanner work |
+
+### scale and measured component checks
+
+These are square-area counts at a 384-block world height, before the renderer's circular culling/refinement. They do not imply allocating or transmitting every node:
+
+| View radius | Old L0 grid candidates | L4 nodes covering the square | Same-LOD L4 proof groups |
+|-------------|------------------------|-----------------------------|-------------------------|
+| 512 chunks (16,384-block side) | 3,145,728 | 2,048 | 128 |
+| 1024 chunks (32,768-block side) | 12,582,912 | 8,192 | 512 |
+
+Fine nodes are added only when requested by native refinement; a coarse group hash does not suppress such requests. A fixed two-stage group fits a maximum 64-leaf proof and avoids balancing/persisting a separate B+ tree. Group metadata on the server scales with active demand, not the L0 world volume.
+
+The automated synthetic 32,768-square test warms 8,192 fingerprints, then runs **256 × 512 = 131,072 group comparisons with zero additional hashes**. One local run took about **216 ms** for the cached comparisons, excluding initial hashing/storage, Minecraft ticks and networking. Actual codecs measured **132,992 bytes** for a flat 8,192-entry audit versus **69,378 bytes** for unchanged grouped request/reply audits (**47.8% less**); about 1% differing groups used **70,696 bytes** including second-stage metadata. Spread across 180 seconds, the unchanged audit is about **386 bytes/second/player** in both directions combined. This clears the 10% threshold for this modeled **audit metadata** workload. It is not a measured reduction in total production bandwidth: new terrain still needs delivery, changed terrain has extra proofs, and TCP framing/compression and native refinement alter the result.
+
+The redstone component test coalesces 100,000 notifications into one source item. The retained 64-player test exercises 76,800 queue admissions under 20,000 bytes/second/player with deliberately smaller 24 KiB queues, checks every admission/dequeue/cleanup and releases all batch resources. Those are component stress tests, not live player/TPS benchmarks.
+
+### verification and remaining limits
+
+Run with JDK 25 and the compatible Voxy jar in `libs/`:
+
+```bash
+./gradlew build check runRegressionTests runNativeRegression runNativeClientRegression
+./scripts/test-semantic-sync.sh
 ```
 
-higher `lodStreamRadius` means more LOD coverage but more storage and bandwidth. `maxSectionsPerTickPerPlayer` controls how fast LODs are sent to new players or when moving into unexplored areas. `maxBandwidthBytesPerSec` strictly shapes network egress using a token bucket filter. `sectionsPerPacket` controls how many sections are packed into each network packet.
+The **15 standalone suites** include proof changes/deletions, duplicate/out-of-order messages, late ACKs, timeout recovery, range isolation, fair bounded mailboxes, source quiet/cooldown/retry/journal behavior, invalidation races, configuration boundaries, semantic registry differences and queue saturation. Both Fabric pre-launch checks apply the real server/client mixins and exercise real Voxy worlds/mappers, native ingest, missing-node placeholders, coarse/fine preservation and source-update locking. They exit before opening a world, network listener, renderer or display. The client check validates that the renderer mixin targets apply; it does not run the live render loop. Test-only classes/resources and the Sodium test runtime do not enter the release jar. Bundled LWJGL core/native versions match Minecraft 26.3's 3.4.3 to avoid a native-library mismatch.
 
-Configuration files are validated before application or saving. Invalid startup files produce field-specific diagnostics and use validated defaults without overwriting the file. Invalid reloads retain the current validated configuration; commands and saves use the same validation guard. Legacy radius aliases are validated before normalization.
-
-### distance-based pacing
-
-when `enableDistancePacing` is enabled, candidate sections are paced by distance:
-- **Near (<= 16 sections)**: 100% transmission rate for immediate close-range visual fidelity.
-- **Mid-Distance (17 ~ 48 sections)**: 50% trickle rate.
-- **Far-Distance (> 48 sections)**: 25% trickle rate.
-
-Paced candidates are deferred into a recovery queue rather than dropped, guaranteeing complete eventual delivery without candidate starvation.
-
-### semantic cache synchronization and server load
-
-Protocol **4** requires matching VoxyServer versions on both sides. Section fingerprints describe voxel meaning: namespaced block names and sorted block-state properties, namespaced biome names, light, and voxel positions. Air variants and their discarded biome slots are normalized to match Voxy storage; air light is preserved. Mapper IDs, registry numbering, LUT order, duplicate/unused LUT entries, compression, and packet encoding do not define content identity. Both sides use the same hash implementation. The client verifies received payloads before ingest and computes inventory fingerprints from its actual stored voxels on a background worker; a sidecar hash alone is not proof that the LOD database still contains that content.
-
-Hashing and inventory/storage work run off the Minecraft tick and render threads. The server shares a bounded fingerprint cache and a 128-section snapshot cache across players. Dirty callbacks invalidate these immediately. New work is limited globally by both the section count and elapsed worker time above; player order rotates between budget windows. The client inventory worker limits itself to 32 section hashes and 20 ms of hashing per second, allowing an already-started section to finish. Increase server budgets only when the CPU and desired initial download speed permit it.
-
-Cache inventories use acknowledged pages of at most 128 entries, with one page in flight per client. Protocol 4 adds the server-captured center and radius to the session and an explicit abort status to page acknowledgements. Pages are numbered from zero within each request. Client scans and server validation use that same frozen dimension/range, even if the player moves. This wire change requires updating both sides.
-
-`PART` pages stage claims without changing confirmed hashes. A contiguous, valid `COMPLETE` atomically replaces confirmations inside that range, updates changed hashes, and removes confirmations for absent client sections. Confirmations outside the range and in other dimensions remain valid. This only changes server verification state; it never deletes client terrain. Identical duplicate pages are idempotent while staging; after commit only the final COMPLETE receipt is retained for ACK-loss retries, releasing the staged page arrays. Conflicting duplicates abort, and gaps require retry. Superseded requests cannot commit.
-
-Sections touched by deliveries overlapping a snapshot are conservatively re-sent rather than trusted from that snapshot. At commit, old overlapping batch confirmations are fenced; their late ACKs release resources and may still confirm sections outside the snapshot range. Queued superseded batches are rejected before transmission. Queue selection, token charging and sending are serialized with snapshot publication so an old queued payload cannot overtake its replacement.
-
-The server processes at most one inventory page every five ticks globally. The initial streaming gate opens after 60 ticks while the transaction may continue. No-progress expiry is 2,400 ticks, absolute expiry is 12,000 ticks, staging is capped at 65,536 unique entries and 1,024 pages, and the client retries a page every 200 ticks and stops after eight failed retry opportunities. Partial pages are flushed after about two seconds of hash work so a slow inventory need not fill 128 entries before reporting progress. Failure, cancellation or expiry discards staging, invalidates uncertain confirmations only within the frozen scope, and resumes scanning. Movement/radius refreshes respect `manifestRefreshIntervalTicks` and wait for the current transaction to finish or expire. These caps may prevent very large inventories from completing; correctness then falls back to scoped re-transmission.
-
-Outbound queues enforce both 128 packets and 8 MiB for every priority. Oversized packets are rejected before eviction. High-priority admissions may evict the newest normal packets but protect the oldest normal packet; admission is rejected if the remaining queue still exceeds either cap. When no normal packet is queued, one normal admission may evict newest high-priority packets to ensure background progress. After eight high-priority dequeues, a waiting normal packet gets a turn. Callers fail all evicted/rejected batches and retain their sections for bounded retry.
-
-An exhausted base scanner still admits released paced work and dirty work; dirty work is polled first. Unreleased paced work does not wake an exhausted scan until its release tick. Candidate, acquire, hash-budget and bandwidth deferrals remain recoverable without waiting for the full idle rescan interval.
-
-A world UUID namespaces sidecars, and every new stream session has a fresh unpredictable epoch. Epochs are compared for equality, not by age, so restoring an old backup cannot make old counters appear current. New sessions discard prior verification state while retaining local LOD content for comparison. Matching content is reused; differing content can replace newer client terrain with older server terrain.
-
-Client storage is **overwrite-only**: a valid server section can replace local content, including with an older version after rollback. A missing, ungenerated or unreadable server section never deletes or blanks client terrain. Native Voxy ingest remains enabled, so it can continue acquiring terrain independently. These locally acquired sections are preserved whenever the server has no replacement data. Legacy clear signals only invalidate verification and queued work; they do not clear the local LOD database or its hash sidecar. If a rollback removes a server section entirely, the client's copy intentionally remains until actual replacement data is available. An explicitly transmitted all-air section is still real replacement content.
+Still unverified: a real multi-client Minecraft session, live renderer refinement and missing-parent behavior, sustained TPS and storage throughput on a large explored map, latency while large ingest backlogs drain, and actual total bandwidth savings. User file replacement under a running server is unsupported. Fixed cache/subscription limits may cause extra revalidation in very large/dispersed views. The first connection and cold caches can converge slowly under deliberately low global budgets. Do not treat these results as production-safety or end-to-end certification.
 
 ### restoring a world backup
 
-Stop the server before restoring files. Restore the Minecraft world and its `<world>/voxyserver/` LOD data from the **same consistent backup**. The world UUID may be restored too; fresh session epochs still force content comparison. A rollback does not delete client caches or require redownloading unchanged terrain. Sections absent from the restored server are retained on the client under the overwrite-only contract.
+Stop before restoring. Restore Minecraft files and `<world>/voxyserver/` from the same consistent backup. New unpredictable session epochs force fresh comparison even if the world UUID was rolled back. Absent server nodes preserve the client's copy; real older nodes may overwrite it.
 
-If only Minecraft region files were restored, the old server LOD database may still describe the future. No client hash protocol can fix that source inconsistency. While the server is stopped, move the old `<world>/voxyserver/` directory aside, then rebuild with `/voxyserver import existing all` before admitting clients. The existing `force` import alone does not remove LODs for region files that disappeared. Replacing region files underneath a running server is unsupported.
-
-### regression checks
-
-`./gradlew check` runs the standalone network, synchronization, pacing, region-state and bandwidth suites with assertions enabled. `./gradlew runRegressionTests` runs them explicitly. The dependency-free semantic hashing, rollback identity, and cache-budget tests can also run with JDK 25 using `./scripts/test-semantic-sync.sh`.
-
-### v1.2.5 correctness follow-up (development branch)
-
-The fixes are based on published tag `v1.2.5` (`4deea7a`), which remains unchanged. Development artifacts are `1.2.6-dev`, protocol 4; no replacement release is published by these fixes.
-
-| Area | Previous behavior | Corrected behavior / files |
-|------|-------------------|----------------------------|
-| Inventory | Incremental insert-if-absent claims; moving validation range; old ACK overwrite | Staged scoped transactions and scoped ACK fencing in `PlayerLodTracker`, `LodStreamingService`, `ClientLodSettings`, `ClientLodReceiver` and the session/page ACK payloads |
-| Queue | High-priority bytes could exceed the cap | Final admission checks, bounded eviction and normal progress in `PlayerOutboundQueue`; failed batch recovery in the tracker and streaming service |
-| Configuration | Startup applied/saved unchecked values | Shared validation in `VoxyServerConfig` and the command application boundary |
-| Deferred work | Exhausted scans could wait 1,200 ticks despite ready paced work | `prepareScanWork` admits eligible deferred work; a full paced queue retains the next scan key |
-
-Validation passed all **10/10** suites with `./gradlew build check runRegressionTests` and the standalone semantic script, including full JAR/source packaging, real Minecraft registry semantics, 100 concurrent old-ACK/snapshot races, concurrent queue accounting, a 256-player/512-page inventory simulation at the global five-tick page cadence, and a 64-player component simulation with 400 ticks and 76,800 admissions at 20,000 bytes/sec/player. The load simulation uses a deliberately smaller 24 KiB queue limit to force saturation; it checks every admission/dequeue/cleanup against both caps and verifies all outstanding resources return to zero. The recorded saturated run sent/ACKed 6,208 batches, failed 70,208 admissions/evictions through recovery, and drained the remaining 384 batches during cleanup. These counts describe the synthetic workload, not network or TPS measurements. Regression coverage includes H1-to-H2 refresh, scoped absence, duplicate/conflicting/gapped pages, stale requests/ACKs, failure and both expiry deadlines, configuration boundaries, and tick-2 paced recovery. These are component tests: no real Minecraft client/server session, render correctness, native-ingest race under live play, sustained TPS or production bandwidth savings has been validated.
-
-Enable `debugTrackingEnabled` for server hash/cache/skip/send totals and per-player transaction duration/completion tick, staged entries, ACK timeouts, delivery failures/retries, dirty enqueue-to-ACK recovery ticks, and queue occupancy/peak/evictions/rejections. Delivery failure rate includes local rejection/eviction, not only negative client ACKs. Client manifest logs record scanned sections, hashes, hash milliseconds, total build time and completion status. Metrics are process-local diagnostics, not persisted analytics.
+Restoring only Minecraft region files leaves the LOD database inconsistent. Move old LOD storage aside while stopped and explicitly rebuild/import before serving it. A normal `force` import does not remove LODs for vanished region files. A fresh map under normal daily edits does not need this full-world import path.
 
 ### client config
 
@@ -203,7 +191,7 @@ if the client has [ModMenu](https://modrinth.com/mod/modmenu) and [Cloth Config]
 | option | description |
 |--------|-------------|
 | **Enable LOD Streaming** | toggle whether the server sends LOD data to you |
-| **LOD Stream Radius** | personal LOD radius in blocks, 0 = use server default |
+| **LOD Stream Radius** | personal remote cap in chunks, 0 = follow Voxy/server limits |
 | **Max Sections Per Tick** | personal rate limit for sections sent per tick, 0 = use server default |
 
 these values are capped at the server's configured maximums and sent to the server automatically when saved.
@@ -239,7 +227,7 @@ checkpoints are inside each dimension's LOD `storage/import-checkpoints/` direct
 
 ## storage
 
-LOD data is stored per world at `<world>/voxyserver/`. this can be safely deleted to regenerate all LOD data.
+LOD data is stored per world at `<world>/voxyserver/`. Stop the server and keep a consistent backup before replacing it. Rebuilding existing explored terrain is an explicit import operation, not an automatic startup scan.
 
 ## license
 

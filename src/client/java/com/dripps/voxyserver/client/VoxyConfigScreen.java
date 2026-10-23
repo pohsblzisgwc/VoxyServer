@@ -41,10 +41,10 @@ public class VoxyConfigScreen {
 
         category.addEntry(entryBuilder.startIntSlider(
                         Component.literal("LOD Stream Radius"),
-                        ClientLodSettings.getPreferredRadius(),
+                        ClientLodSettings.getConfiguredRadius(),
                         0, maxRadius)
                 .setDefaultValue(0)
-                .setTooltip(Component.literal("how far LODs are streamed in blocks, 0 = server default (" + maxRadius + ")"))
+                .setTooltip(Component.literal("maximum remote distance in chunks; also capped by Voxy, 0 = automatic (" + maxRadius + ")"))
                 .setSaveConsumer(ClientLodSettings::setPreferredRadius)
                 .build());
 

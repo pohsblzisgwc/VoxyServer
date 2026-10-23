@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "id": "voxyserver_regression",
+  "version": "1.0.0",
+  "name": "VoxyServer native regression fixture",
+  "environment": "*",
+  "entrypoints": {"preLaunch": ["com.dripps.voxyserver.NativeRegressionBootstrap"]},
+  "depends": {"voxyserver": "*"}
+}

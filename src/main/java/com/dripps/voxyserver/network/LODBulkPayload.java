@@ -42,6 +42,7 @@ public record LODBulkPayload(
         for (LODSectionPayload section : payload.sections) {
             buf.writeLong(section.sectionKey());
             buf.writeLong(section.contentHash());
+            buf.writeByte(section.childMask());
             int lutLen = section.lutBlockStateIds().length;
             buf.writeVarInt(lutLen);
             for (int i = 0; i < lutLen; i++) {
@@ -75,13 +76,14 @@ public record LODBulkPayload(
         if (count < 1 || count > MAX_SECTIONS) {
             throw new IllegalArgumentException("invalid bulk section count: " + count);
         }
-        if (buf.readableBytes() < count * 27) {
-            throw new IllegalArgumentException("truncated bulk payload: needed at least " + (count * 27) + " bytes, but only " + buf.readableBytes() + " available");
+        if (buf.readableBytes() < count * 28) {
+            throw new IllegalArgumentException("truncated bulk payload: needed at least " + (count * 28) + " bytes, but only " + buf.readableBytes() + " available");
         }
         List<LODSectionPayload> sections = new ArrayList<>(count);
         for (int s = 0; s < count; s++) {
             long sectionKey = buf.readLong();
             long contentHash = buf.readLong();
+            byte children = buf.readByte();
             int lutLen = buf.readVarInt();
             if (lutLen < 1 || lutLen > MAX_LUT_ENTRIES) {
                 throw new IllegalArgumentException("invalid lookup table size: " + lutLen);
@@ -117,7 +119,7 @@ public record LODBulkPayload(
                     indexArray[idx] = (short) ((packed >> (ei * bitsPerEntry)) & mask);
                 }
             }
-            sections.add(new LODSectionPayload(dimension, sectionKey, blockStateIds, biomeIds, light, indexArray, contentHash));
+            sections.add(new LODSectionPayload(dimension, sectionKey, blockStateIds, biomeIds, light, indexArray, contentHash, children));
         }
         return new LODBulkPayload(dimension, sections);
     }

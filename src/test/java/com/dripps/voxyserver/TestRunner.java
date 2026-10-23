@@ -14,9 +14,14 @@ public class TestRunner {
         System.out.println("=================================================\n");
 
         int passedSuites = 0;
-        int totalSuites = 10;
+        int totalSuites = 15;
 
         try {
+            DemandProtocolTest.runAllTests();passedSuites++;
+            DemandStateTest.runAllTests();passedSuites++;
+            DirtyMaintenanceTest.runAllTests();passedSuites++;
+            com.dripps.voxyserver.server.DemandIndexTest.runAllTests();passedSuites++;
+            com.dripps.voxyserver.server.DemandLoadTest.runAllTests();passedSuites++;
             ManifestSnapshotTest.runAllTests();
             passedSuites++;
             OutboundQueueTest.runAllTests();

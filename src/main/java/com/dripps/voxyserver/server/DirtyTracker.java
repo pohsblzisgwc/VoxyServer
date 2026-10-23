@@ -1,92 +1,22 @@
 package com.dripps.voxyserver.server;
 
-import net.minecraft.resources.Identifier;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.world.level.chunk.LevelChunk;
 
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-
-// waits a few ticks before pushing dirty updates bc was causing issues
-public class DirtyTracker {
+/** Constant-size bitmap marking only: no per-block hashing, snapshot copying or index updates. */
+public final class DirtyTracker {
     public static volatile DirtyTracker INSTANCE;
+    private final LodStreamingService streaming;
 
-    private final ConcurrentHashMap<DirtySection, Boolean> dirtySections = new ConcurrentHashMap<>();
-    private final ChunkVoxelizer voxelizer;
-    private final LodStreamingService streamingService;
-    private volatile int flushInterval;
-    private int tickCounter = 0;
-
-    private record DirtySection(Identifier dimension, int chunkX, int sectionY, int chunkZ) {}
-    private record ChunkPosDim(Identifier dimension, int chunkX, int chunkZ) {}
-
-    public DirtyTracker(ChunkVoxelizer voxelizer, LodStreamingService streamingService, int flushInterval) {
-        this.voxelizer = voxelizer;
-        this.streamingService = streamingService;
-        this.flushInterval = flushInterval;
-    }
-
-    public void updateFlushInterval(int flushInterval) {
-        this.flushInterval = flushInterval;
+    public DirtyTracker(ChunkVoxelizer ignored, LodStreamingService streaming, int interval) {
+        this.streaming = streaming;
     }
 
     public void markDirty(ServerLevel level, int chunkX, int blockY, int chunkZ) {
-        Identifier dim = level.dimension().identifier();
-        int sectionY = blockY >> 5;
-        DirtySection dirtySection = new DirtySection(dim, chunkX, sectionY, chunkZ);
-        dirtySections.put(dirtySection, Boolean.TRUE);
+        streaming.markSourceDirty(level, chunkX << 4, blockY, chunkZ << 4);
     }
 
-    public void tick(MinecraftServer server) {
-        if (++tickCounter < flushInterval) {
-            return;
-        }
-        tickCounter = 0;
+    public void updateFlushInterval(int interval) {}
 
-        if (dirtySections.isEmpty()) {
-            return;
-        }
-
-        Set<DirtySection> toProcess = ConcurrentHashMap.newKeySet();
-        var iter = dirtySections.keySet().iterator();
-        while (iter.hasNext()) {
-            toProcess.add(iter.next());
-            iter.remove();
-        }
-
-        java.util.HashMap<ChunkPosDim, java.util.Set<Integer>> sectionsByChunk = new java.util.HashMap<>();
-        for (DirtySection ds : toProcess) {
-            ChunkPosDim cpd = new ChunkPosDim(ds.dimension, ds.chunkX, ds.chunkZ);
-            sectionsByChunk.computeIfAbsent(cpd, ignored -> new java.util.HashSet<>()).add(ds.sectionY);
-        }
-
-        for (var entry : sectionsByChunk.entrySet()) {
-            ChunkPosDim chunkPos = entry.getKey();
-            ServerLevel level = findLevel(server, chunkPos.dimension);
-            if (level == null) continue;
-
-            LevelChunk chunk = level.getChunkSource().getChunkNow(chunkPos.chunkX, chunkPos.chunkZ);
-            if (chunk == null) continue;
-
-            for (int sectionY : entry.getValue()) {
-                streamingService.markChunkPendingDirty(chunkPos.dimension, chunkPos.chunkX, sectionY, chunkPos.chunkZ);
-            }
-
-            if (!voxelizer.revoxelizeChunk(level, chunk)) {
-                for (int sectionY : entry.getValue()) {
-                    streamingService.clearChunkPendingDirty(chunkPos.dimension, chunkPos.chunkX, sectionY, chunkPos.chunkZ);
-                }
-            }
-        }
-    }
-
-    private static ServerLevel findLevel(MinecraftServer server, Identifier dimension) {
-        for (ServerLevel level : server.getAllLevels()) {
-            if (level.dimension().identifier().equals(dimension)) {
-                return level;
-            }
-        }
-        return null;
-    }
+    public void tick(MinecraftServer server) {}
 }

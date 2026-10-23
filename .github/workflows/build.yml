@@ -48,7 +48,7 @@ jobs:
         uses: gradle/actions/setup-gradle@v3
 
       - name: Build with Gradle
-        run: ./gradlew build --no-daemon
+        run: ./gradlew build runNativeRegression runNativeClientRegression --no-daemon
 
       - name: Generate Checksums
         run: |
@@ -75,9 +75,9 @@ jobs:
           previous_tag: v1.2.5
           generate_release_notes: true
           body: |
-            Protocol 4 requires updating the client and server together.
+            Protocol 5 requires updating the client and server together.
 
-            Inventory refreshes now commit complete, bounded snapshots with frozen ranges and scoped ACK fencing. Section reuse compares semantic block, biome, light, and voxel content. Rollbacks replace client data only when the server has actual section data; client-only cached terrain is preserved.
+            Client render demand replaces server view-grid polling. Same-LOD group summaries select the leaf hashes to compare; only differing native nodes are sent. Bounded asynchronous source maintenance coalesces block/light changes. Semantic proofs include child topology and fence both data installation and ACKs. Server absence preserves client-only terrain.
           files: |
             build/libs/*.jar
             build/libs/checksums-sha256.txt

@@ -18,7 +18,7 @@ public class VoxyServerConfig {
     public int maxClientVoxyRadius = 1024;
     public int lodStreamRadius = 1024;
     public int maxSectionsPerTickPerPlayer = 100;
-    public int sectionsPerPacket = 50;
+    public int sectionsPerPacket = 16;
     public boolean generateOnChunkLoad = true;
     public boolean generateOnChunkUnload = true;
     public int tickInterval = 5;
@@ -28,6 +28,10 @@ public class VoxyServerConfig {
     public boolean debugTrackingEnabled = false;
     public int debugTrackingInterval = 200;
     public boolean hashSyncEnabled = true;
+    public int maintenanceMillisPerSecond = 20;
+    public int maintenanceQuietMillis = 2000;
+    public int maintenanceCooldownMillis = 10_000;
+    public int maxDemandRequestsPerSecond = 20;
     public int hashWorkIntervalTicks = 20;
     public int maxHashComputationsPerInterval = 64;
     public int maxHashMillisPerInterval = 10;
@@ -59,6 +63,10 @@ public class VoxyServerConfig {
         if (maxHashMillisPerInterval < 1 || maxHashMillisPerInterval > 1000) errors.add("maxHashMillisPerInterval must be 1..1000, got " + maxHashMillisPerInterval);
         if (hashRecheckIntervalTicks < hashWorkIntervalTicks) errors.add("hashRecheckIntervalTicks must be >= hashWorkIntervalTicks, got " + hashRecheckIntervalTicks);
         if (manifestRefreshIntervalTicks < 100) errors.add("manifestRefreshIntervalTicks must be >= 100, got " + manifestRefreshIntervalTicks);
+        if(maintenanceMillisPerSecond<1||maintenanceMillisPerSecond>250)errors.add("maintenanceMillisPerSecond must be 1..250");
+        if(maintenanceQuietMillis<100||maintenanceQuietMillis>30_000)errors.add("maintenanceQuietMillis must be 100..30000");
+        if(maintenanceCooldownMillis<1000||maintenanceCooldownMillis>180_000)errors.add("maintenanceCooldownMillis must be 1000..180000");
+        if(maxDemandRequestsPerSecond<1||maxDemandRequestsPerSecond>100)errors.add("maxDemandRequestsPerSecond must be 1..100");
         return errors;
     }
 

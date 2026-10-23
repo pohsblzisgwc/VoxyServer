@@ -44,7 +44,7 @@ repositories {
     mavenCentral()
 }
 
-def lwjglVersion = "3.4.1"
+def lwjglVersion = "3.4.3"
 def serverLwjgl = configurations.create("serverLwjgl")
 serverLwjgl.transitive = false
 
@@ -173,3 +173,39 @@ tasks.register('runRegressionTests', JavaExec) {
     enableAssertions = true
 }
 check.dependsOn runRegressionTests
+
+// Test-only Fabric launch applies the real native mixins; no world, renderer, or network listener is started.
+loom {
+    mods {
+        voxyserver_regression { sourceSet sourceSets.test }
+    }
+    runs {
+        nativeRegression {
+            server()
+            source = sourceSets.test
+            runDir = 'build/native-regression'
+            vmArg '-Dvoxyserver.nativeRegression=true'
+            vmArg '-Dmixin.debug.countInjections=true'
+        }
+    }
+}
+dependencies { testRuntimeOnly "maven.modrinth:sodium:mc26.3-0.9.2-fabric" }
+// Loom filters client LWJGL modules from server launches; use the same bundled provider as the production jar.
+dependencies { testRuntimeOnly files(serverLwjglJar) }
+loom {
+    runs {
+        nativeClientRegression {
+            client()
+            source = sourceSets.test
+            runDir = 'build/native-client-regression'
+            vmArg '-Dvoxyserver.nativeRegression=true'
+            vmArg '-Dvoxyserver.clientMixinRegression=true'
+            vmArg '-Dmixin.debug.countInjections=true'
+        }
+    }
+}
+tasks.named('runNativeClientRegression') {
+    // The pre-launch fixture exits before game startup. Assets, authentication, a display and GL are unnecessary.
+    setDependsOn([tasks.named('testClasses'), tasks.named('clientClasses'), tasks.named('configureLaunch')])
+    classpath += sourceSets.client.runtimeClasspath
+}

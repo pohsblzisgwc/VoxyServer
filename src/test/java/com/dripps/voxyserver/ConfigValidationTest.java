@@ -18,6 +18,10 @@ public final class ConfigValidationTest {
             boundary(path,"maxHashMillisPerInterval",new int[]{0,1,1000,1001});
             boundary(path,"hashRecheckIntervalTicks",new int[]{-1,0,19,20,Integer.MAX_VALUE});
             boundary(path,"manifestRefreshIntervalTicks",new int[]{0,99,100,Integer.MAX_VALUE});
+            boundary(path,"maintenanceMillisPerSecond",new int[]{0,1,20,250,251});
+            boundary(path,"maintenanceQuietMillis",new int[]{0,99,100,30000,30001});
+            boundary(path,"maintenanceCooldownMillis",new int[]{0,999,1000,180000,180001});
+            boundary(path,"maxDemandRequestsPerSecond",new int[]{0,1,20,100,101});
             boundary(path,"lodStreamRadius",new int[]{-1,0,1,4096,4097});
             Files.writeString(path,"null");
             require(VoxyServerConfig.load(path).validate().isEmpty() && Files.readString(path).equals("null"),"null config overwritten");

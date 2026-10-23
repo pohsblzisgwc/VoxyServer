@@ -5,7 +5,7 @@ import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.resources.Identifier;
 
-// single level 0 LOD section sent from server to client
+// One native LOD 0..4 section sent from server to client
 // contains: dimension id, section position key, a LUT of vanilla registry ids, and an index array
 // contentHash is the canonical content fingerprint the client persists for hash sync
 public record LODSectionPayload(
@@ -15,7 +15,8 @@ public record LODSectionPayload(
         int[] lutBiomeIds,
         byte[] lutLight,
         short[] indexArray,
-        long contentHash
+        long contentHash,
+        byte childMask
 ) implements CustomPacketPayload {
 
     public static final Type<LODSectionPayload> TYPE =
@@ -23,6 +24,10 @@ public record LODSectionPayload(
 
     public static final StreamCodec<RegistryFriendlyByteBuf, LODSectionPayload> CODEC =
             StreamCodec.of(LODSectionPayload::write, LODSectionPayload::read);
+
+    public LODSectionPayload(Identifier dimension,long key,int[] states,int[] biomes,byte[] light,short[] indices,long hash) {
+        this(dimension,key,states,biomes,light,indices,hash,(byte)0);
+    }
 
     public LODSectionPayload {
         if (dimension == null) {
@@ -45,6 +50,7 @@ public record LODSectionPayload(
         buf.writeIdentifier(payload.dimension);
         buf.writeLong(payload.sectionKey);
         buf.writeLong(payload.contentHash);
+        buf.writeByte(payload.childMask);
 
         buf.writeVarInt(lutLen);
         for (int i = 0; i < lutLen; i++) {
@@ -74,6 +80,7 @@ public record LODSectionPayload(
         Identifier dimension = buf.readIdentifier();
         long sectionKey = buf.readLong();
         long contentHash = buf.readLong();
+        byte children = buf.readByte();
 
         int lutLen = buf.readVarInt();
         if (lutLen < 1 || lutLen > LODBulkPayload.MAX_LUT_ENTRIES) {
@@ -112,7 +119,7 @@ public record LODSectionPayload(
             }
         }
 
-        return new LODSectionPayload(dimension, sectionKey, blockStateIds, biomeIds, light, indexArray, contentHash);
+        return new LODSectionPayload(dimension, sectionKey, blockStateIds, biomeIds, light, indexArray, contentHash, children);
     }
 
     @Override

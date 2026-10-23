@@ -11,7 +11,7 @@ public record LODStreamSessionPayload(Identifier dimension, long streamEpoch,
         implements CustomPacketPayload {
 
     public static final Type<LODStreamSessionPayload> TYPE =
-            new Type<>(Identifier.parse("voxyserver:lod_stream_session_v4"));
+            new Type<>(Identifier.parse("voxyserver:lod_stream_session_v5"));
 
     public static final StreamCodec<RegistryFriendlyByteBuf, LODStreamSessionPayload> CODEC =
             StreamCodec.of(LODStreamSessionPayload::write, LODStreamSessionPayload::read);

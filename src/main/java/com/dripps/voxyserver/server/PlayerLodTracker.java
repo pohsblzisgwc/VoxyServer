@@ -248,6 +248,18 @@ public class PlayerLodTracker {
 
     public synchronized boolean containsManifestKey(long key) { return manifestScope.contains(key); }
     public synchronized ManifestScope manifestScope() { return manifestScope; }
+    public synchronized void supersedeSections(long[] keys) {
+        for(long key:keys) {
+            acknowledgedSectionHashes.remove(key);
+            for(var owner:outstandingBatches.entrySet()) {
+                for(long value:owner.getValue().sectionKeys)if(value==key) {
+                    owner.getValue().invalidated.add(key);
+                    if(sectionOwners.get(key)==owner.getKey())sectionOwners.remove(key);
+                }
+            }
+        }
+    }
+
     public synchronized boolean isBatchSendable(long epoch, long batchId) {
         OutstandingBatch batch = outstandingBatches.get(batchId);
         return epoch == streamEpoch && batch != null && batch.invalidated.isEmpty();
@@ -450,6 +462,14 @@ public class PlayerLodTracker {
     }
 
     public synchronized boolean completeBatch(long epoch, long batchId, boolean success, long tick) {
+        return completeBatch(epoch,batchId,success,tick,true);
+    }
+
+    public synchronized boolean completeDemandBatch(long epoch,long batchId,boolean success,long tick) {
+        return completeBatch(epoch,batchId,success,tick,false);
+    }
+
+    private boolean completeBatch(long epoch,long batchId,boolean success,long tick,boolean legacyScan) {
         if (epoch != streamEpoch) return false;
         OutstandingBatch batch = outstandingBatches.remove(batchId);
         if (batch == null) return false;
@@ -465,11 +485,20 @@ public class PlayerLodTracker {
             }
         } else {
             batchesFailed++; retries += batch.sectionKeys.length;
-            for (long key : batch.sectionKeys) deferDirtySection(key, LodStreamingService.extractSectionKey(key), tick);
+            if (legacyScan) for (long key : batch.sectionKeys) deferDirtySection(key, LodStreamingService.extractSectionKey(key), tick);
             retryNotBeforeTick = Math.max(retryNotBeforeTick, tick + 100L);
             resetScanStateLocked();
         }
         return true;
+    }
+
+    public synchronized List<Long> expiredDemandBatches(long tick,long timeoutTicks) {
+        var expired=new ArrayList<Long>();
+        outstandingBatches.forEach((id,batch)->{
+            if(tick-batch.createdTick>=timeoutTicks){
+                if(!batch.timeoutCounted){batch.timeoutCounted=true;ackTimeouts++;} expired.add(id);
+            }
+        });return expired;
     }
 
     public synchronized boolean hasTimedOutBatch(long tick, long timeoutTicks) {

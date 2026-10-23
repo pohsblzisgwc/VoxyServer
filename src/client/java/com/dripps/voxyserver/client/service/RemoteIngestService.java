@@ -4,16 +4,16 @@ import com.dripps.voxyserver.client.ClientLodHashStore;
 import com.dripps.voxyserver.client.ClientLodSettings;
 import com.dripps.voxyserver.util.SemanticSectionHash;
 import com.dripps.voxyserver.util.SemanticPalette;
+import com.dripps.voxyserver.sync.NativeNodeCodec;
+import com.dripps.voxyserver.sync.DemandGroup;
+import com.dripps.voxyserver.client.ClientDemand;
 import com.dripps.voxyserver.network.LODBatchResultPayload;
 import com.dripps.voxyserver.network.LODBulkPayload;
 import com.dripps.voxyserver.network.LODSectionPayload;
 import com.dripps.voxyserver.network.PreSerializedLodPayload;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.thread.ServiceManager;
-import me.cortex.voxy.common.voxelization.VoxelizedSection;
-import me.cortex.voxy.common.voxelization.WorldVoxilizedSectionMipper;
 import me.cortex.voxy.common.world.WorldEngine;
-import me.cortex.voxy.common.world.WorldUpdater;
 import me.cortex.voxy.common.world.other.Mapper;
 import me.cortex.voxy.commonImpl.WorldIdentifier;
 import net.minecraft.core.Holder;
@@ -40,6 +40,7 @@ public final class RemoteIngestService {
     private static final int MAX_QUEUED_BATCHES = 64;
 
     private final ThreadPoolExecutor executor;
+    private final Object sessionLock = new Object();
     private final AtomicLong generation = new AtomicLong();
     private volatile Identifier activeDimension;
     private volatile long activeEpoch;
@@ -72,6 +73,8 @@ public final class RemoteIngestService {
             int status = LODBatchResultPayload.FAILURE;
             try {
                 status = process(this);
+            } catch (java.util.concurrent.CancellationException stale) {
+                status = LODBatchResultPayload.STALE;
             } catch (Throwable throwable) {
                 Logger.error("remote ingest failed", throwable);
             } finally {
@@ -123,6 +126,7 @@ public final class RemoteIngestService {
     }
 
     public void startSession(Identifier dimension, long epoch) {
+        synchronized (sessionLock) {
         if (activeEpoch == epoch && Objects.equals(activeDimension, dimension)) return;
         activeDimension = dimension;
         activeEpoch = epoch;
@@ -132,6 +136,8 @@ public final class RemoteIngestService {
             if (queued instanceof IngestTask task) task.cancel();
         }
     }
+
+        }
 
     public boolean isLive() {
         return live && !executor.isShutdown();
@@ -173,7 +179,8 @@ public final class RemoteIngestService {
             for (LODSectionPayload section : bulk.sections()) {
                 long actual = SemanticSectionHash.compute(SemanticPalette.resolve(section.lutBlockStateIds(),
                         section.lutBiomeIds(), section.lutLight(), semanticBiomes), section.indexArray());
-                if (actual != section.contentHash()) return LODBatchResultPayload.FAILURE;
+                if (!task.dimension.equals(section.dimension()) || !DemandGroup.valid(section.sectionKey())
+                        || NativeNodeCodec.proofHash(actual,section.childMask()) != section.contentHash()) return LODBatchResultPayload.FAILURE;
             }
             Mapper mapper = engine.getMapper();
             long[] keys = new long[bulk.sections().size()];
@@ -191,36 +198,17 @@ public final class RemoteIngestService {
                         task.registryAccess
                 );
 
-                int secX = WorldEngine.getX(section.sectionKey());
-                int secY = WorldEngine.getY(section.sectionKey());
-                int secZ = WorldEngine.getZ(section.sectionKey());
-                short[] indexArray = section.indexArray();
-
-                for (int oy = 0; oy < 2; oy++) {
-                    for (int oz = 0; oz < 2; oz++) {
-                        for (int ox = 0; ox < 2; ox++) {
-                            VoxelizedSection voxelized = VoxelizedSection.createEmpty();
-                            voxelized.setPosition(secX * 2 + ox, secY * 2 + oy, secZ * 2 + oz);
-                            int nonAirCount = 0;
-                            for (int vy = 0; vy < 16; vy++) {
-                                for (int vz = 0; vz < 16; vz++) {
-                                    for (int vx = 0; vx < 16; vx++) {
-                                        int sourceIndex = ((oy * 16 + vy) << 10)
-                                                | ((oz * 16 + vz) << 5) | (ox * 16 + vx);
-                                        int targetIndex = (vy << 8) | (vz << 4) | vx;
-                                        int lutIndex = indexArray[sourceIndex] & 0xFFFF;
-                                        if (lutIndex >= remappedLut.length) return LODBatchResultPayload.FAILURE;
-                                        long id = remappedLut[lutIndex];
-                                        voxelized.section[targetIndex] = id;
-                                        if (!Mapper.isAir(id)) nonAirCount++;
-                                    }
-                                }
-                            }
-                            voxelized.lvl0NonAirCount = nonAirCount;
-                            WorldVoxilizedSectionMipper.mipSection(voxelized, mapper);
-                            WorldUpdater.insertUpdate(engine, voxelized);
+                synchronized (sessionLock) {
+                    if (!isCurrent(task)) return LODBatchResultPayload.STALE;
+                    boolean applied = ClientDemand.install(task.raw, section.sectionKey(), () -> {
+                        synchronized (engine) {
+                            com.dripps.voxyserver.sync.NativeNodeInstaller.install(engine, section.sectionKey(),
+                                    remappedLut, section.indexArray(), section.childMask());
+                            ClientDemand.nodeReceived(engine, section.sectionKey(), section.childMask(),
+                                    task.raw.streamEpoch(), task.raw.demandRequestId());
                         }
-                    }
+                    });
+                    if (!applied) return LODBatchResultPayload.STALE;
                 }
                 keys[sectionIndex] = section.sectionKey();
                 hashes[sectionIndex] = section.contentHash();

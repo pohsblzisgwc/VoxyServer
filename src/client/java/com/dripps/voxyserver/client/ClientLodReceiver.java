@@ -5,7 +5,7 @@ import com.dripps.voxyserver.client.service.RemoteIngestService;
 import com.dripps.voxyserver.network.LODBatchResultPayload;
 import com.dripps.voxyserver.network.LODClearPayload;
 import com.dripps.voxyserver.network.LODHandshakePayload;
-import com.dripps.voxyserver.network.LODManifestAckPayload;
+import com.dripps.voxyserver.network.LODDemandReplyPayload;
 import com.dripps.voxyserver.network.LODHashSyncSettingsPayload;
 import com.dripps.voxyserver.network.LODProtocolPayload;
 import com.dripps.voxyserver.network.LODServerSettingsPayload;
@@ -132,8 +132,7 @@ public final class ClientLodReceiver {
             scheduleDrain(context.client());
         });
 
-        ClientPlayNetworking.registerGlobalReceiver(LODManifestAckPayload.TYPE, (payload, context) ->
-                context.client().execute(() -> ClientLodSettings.acknowledge(payload)));
+        ClientPlayNetworking.registerGlobalReceiver(LODDemandReplyPayload.TYPE, (payload, context) -> ClientDemand.receive(payload));
 
         ClientPlayNetworking.registerGlobalReceiver(LODClearPayload.TYPE, (payload, context) ->
                 context.client().execute(() -> handleClear(payload)));

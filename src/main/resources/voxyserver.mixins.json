@@ -2,9 +2,16 @@
   "required": true,
   "minVersion": "0.8",
   "package": "com.dripps.voxyserver.mixin",
-  "compatibilityLevel": "JAVA_21",
+  "compatibilityLevel": "JAVA_25",
   "mixins": [
-    "LevelChunkMixin"
+    "LevelChunkMixin",
+    "WorldUpdaterMixin",
+    "ChunkSectionSnapshotMixin",
+    "WorldEngineObserverMixin",
+    "ServerLightUpdateMixin",
+    "WorldSectionPresenceMixin",
+    "SectionLoadPresenceMixin",
+    "ServerBiomeUpdateMixin"
   ],
   "injectors": {
     "defaultRequire": 1
