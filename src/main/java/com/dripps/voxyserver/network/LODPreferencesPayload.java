@@ -11,7 +11,7 @@ public record LODPreferencesPayload(
         int maxSectionsPerTick
 ) implements CustomPacketPayload {
 
-    public static final int MAX_ALLOWED_RADIUS = 2048;
+    public static final int MAX_ALLOWED_RADIUS = 4096;
     public static final int MAX_ALLOWED_SECTIONS = 1024;
 
     public static final Type<LODPreferencesPayload> TYPE =

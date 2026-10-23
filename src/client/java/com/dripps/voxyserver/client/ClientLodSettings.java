@@ -45,6 +45,7 @@ public final class ClientLodSettings {
     private static volatile Identifier sessionDimension;
     private static volatile long streamEpoch;
     private static volatile long manifestRequestId;
+    private static int lastReportedRadius = -1;
     private static String activeServerKey;
     private static ClientLodConfig.Preferences activePreferences = CONFIG.getPreferencesForServer(null);
 
@@ -62,6 +63,7 @@ public final class ClientLodSettings {
     public static void prepareForCurrentConnection() {
         serverMaxRadius = -1;
         serverMaxSections = -1;
+        lastReportedRadius = -1;
         protocolOk = false;
         serverHashSyncEnabled = true;
         sessionDimension = null;
@@ -110,6 +112,14 @@ public final class ClientLodSettings {
     }
 
     public static void onClientTick() {
+        if (protocolOk && Minecraft.getInstance().getConnection() != null) {
+            int currentVoxyRadius = resolveVoxyPreferredRadius();
+            if (currentVoxyRadius > 0 && currentVoxyRadius != lastReportedRadius) {
+                lastReportedRadius = currentVoxyRadius;
+                sendPreferences();
+            }
+        }
+
         ManifestChunk chunk = manifestChunks.poll();
         if (chunk == null) return;
         if (!isCurrent(chunk)) return;
@@ -277,14 +287,27 @@ public final class ClientLodSettings {
                 && chunk.dimension.equals(sessionDimension);
     }
 
+    public static int resolveVoxyPreferredRadius() {
+        try {
+            if (me.cortex.voxy.client.config.VoxyConfig.CONFIG != null) {
+                float secDist = me.cortex.voxy.client.config.VoxyConfig.CONFIG.sectionRenderDistance;
+                if (secDist > 0) {
+                    return Math.min(4096, (int) Math.ceil(secDist * 2.0f));
+                }
+            }
+        } catch (Throwable ignored) {}
+        return activePreferences.preferredRadius;
+    }
+
     private static int effectiveRadius() {
-        int preferred = activePreferences.preferredRadius;
+        int preferred = resolveVoxyPreferredRadius();
         return preferred <= 0 ? serverMaxRadius : Math.min(preferred, serverMaxRadius);
     }
 
     public static void reset() {
         serverMaxRadius = -1;
         serverMaxSections = -1;
+        lastReportedRadius = -1;
         protocolOk = false;
         serverHashSyncEnabled = true;
         sessionDimension = null;
@@ -315,7 +338,7 @@ public final class ClientLodSettings {
     }
 
     public static int getPreferredRadius() {
-        return activePreferences.preferredRadius;
+        return resolveVoxyPreferredRadius();
     }
 
     public static int getPreferredMaxSections() {
@@ -342,10 +365,12 @@ public final class ClientLodSettings {
 
     public static void sendPreferences() {
         if (Minecraft.getInstance().getConnection() == null) return;
+        int radius = resolveVoxyPreferredRadius();
+        lastReportedRadius = radius;
         ClientPlayNetworking.send(new LODPreferencesPayload(
                 activePreferences.enabled,
-                activePreferences.preferredRadius,
-                activePreferences.preferredMaxSections));
+                radius,
+                0));
     }
 
     private static void saveActiveProfile() {

@@ -15,7 +15,8 @@ public class VoxyServerConfig {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final String FILE_NAME = "voxyserver.json";
 
-    public int lodStreamRadius = 256;
+    public int maxClientVoxyRadius = 1024;
+    public int lodStreamRadius = 1024;
     public int maxSectionsPerTickPerPlayer = 100;
     public int sectionsPerPacket = 50;
     public boolean generateOnChunkLoad = true;
@@ -37,6 +38,9 @@ public class VoxyServerConfig {
 
     public List<String> validate() {
         List<String> errors = new ArrayList<>();
+        if (maxClientVoxyRadius < 1 || maxClientVoxyRadius > 4096) {
+            errors.add("maxClientVoxyRadius must be between 1 and 4096, got " + maxClientVoxyRadius);
+        }
         if (lodStreamRadius < 1) errors.add("lodstreamradius must be at least 1, got " + lodStreamRadius);
         if (maxSectionsPerTickPerPlayer < 1) errors.add("maxsectionspertickperplayer must be at least 1, got " + maxSectionsPerTickPerPlayer);
         if (sectionsPerPacket < 1) errors.add("sectionsperpacket must be at least 1, got " + sectionsPerPacket);
@@ -57,6 +61,11 @@ public class VoxyServerConfig {
             if (candidate == null) {
                 Voxyserver.LOGGER.warn("config reload failed bc file parsed as null");
                 return null;
+            }
+            if (candidate.maxClientVoxyRadius != 1024) {
+                candidate.lodStreamRadius = candidate.maxClientVoxyRadius;
+            } else if (candidate.lodStreamRadius != 1024) {
+                candidate.maxClientVoxyRadius = candidate.lodStreamRadius;
             }
             List<String> errors = candidate.validate();
             if (!errors.isEmpty()) {
@@ -79,6 +88,11 @@ public class VoxyServerConfig {
                 String json = Files.readString(configPath);
                 VoxyServerConfig config = GSON.fromJson(json, VoxyServerConfig.class);
                 if (config != null) {
+                    if (config.maxClientVoxyRadius != 1024) {
+                        config.lodStreamRadius = config.maxClientVoxyRadius;
+                    } else if (config.lodStreamRadius != 1024) {
+                        config.maxClientVoxyRadius = config.lodStreamRadius;
+                    }
                     config.save();
                     return config;
                 }

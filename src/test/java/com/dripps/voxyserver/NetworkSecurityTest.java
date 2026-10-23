@@ -130,14 +130,19 @@ public class NetworkSecurityTest {
         }
         assert caughtNegRadius : "Negative radius should be rejected";
 
+        // Max valid radius 4096 accepted
+        LODPreferencesPayload maxValid = new LODPreferencesPayload(true, 4096, 1024);
+        assert maxValid.lodStreamRadius() == 4096;
+        assert maxValid.maxSectionsPerTick() == 1024;
+
         // Excessive radius rejected
         boolean caughtHugeRadius = false;
         try {
-            new LODPreferencesPayload(true, 5000, 100);
+            new LODPreferencesPayload(true, 4097, 100);
         } catch (IllegalArgumentException e) {
             caughtHugeRadius = true;
         }
-        assert caughtHugeRadius : "Huge radius should be rejected";
+        assert caughtHugeRadius : "Radius 4097 should be rejected";
 
         // Negative rate rejected
         boolean caughtNegRate = false;

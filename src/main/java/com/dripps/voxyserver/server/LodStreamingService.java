@@ -188,8 +188,9 @@ public class LodStreamingService {
             tracker.setReady(true);
             if (clientProto == serverProto) {
                 tracker.setProtocolOk(true);
-                tracker.setActiveDimension(player.level().dimension().identifier());
-                ServerPlayNetworking.send(player, new LODProtocolPayload(serverProto));
+                if (ServerPlayNetworking.canSend(player, LODProtocolPayload.TYPE)) {
+                    ServerPlayNetworking.send(player, new LODProtocolPayload(serverProto));
+                }
                 sendSettings(player);
                 sendNewSession(player, tracker, player.level().dimension().identifier());
                 Voxyserver.LOGGER.info("player {} ready for LOD streaming, protocol {}", player.getName().getString(), serverProto);
@@ -317,29 +318,32 @@ public class LodStreamingService {
                 sendNewSession(player, tracker, player.level().dimension().identifier());
             }
         }
-    }
-
     private void sendSettings(ServerPlayer player) {
-        if (ServerPlayNetworking.canSend(player, LODHashSyncSettingsPayload.TYPE)) {
+        if (hashSyncEnabled && ServerPlayNetworking.canSend(player, LODHashSyncSettingsPayload.TYPE)) {
             ServerPlayNetworking.send(player, new LODHashSyncSettingsPayload(hashSyncEnabled));
         }
-        ServerPlayNetworking.send(player, new LODServerSettingsPayload(lodStreamRadius, maxSectionsPerTick));
+        if (ServerPlayNetworking.canSend(player, LODServerSettingsPayload.TYPE)) {
+            ServerPlayNetworking.send(player, new LODServerSettingsPayload(config.maxClientVoxyRadius, maxSectionsPerTick));
+        }
     }
 
     private void sendNewSession(ServerPlayer player, PlayerLodTracker tracker, Identifier dimension) {
+        if (!tracker.isReady() || !tracker.isProtocolOk()) return;
         PlayerLodTracker.StreamSession session = tracker.beginSession(
                 dimension,
                 hashSyncEnabled,
                 currentTick + MANIFEST_TIMEOUT_TICKS
         );
         tracker.recordManifestArea(player.getBlockX() >> 5, player.getBlockZ() >> 5,
-                tracker.getEffectiveRadius(lodStreamRadius) >> 1);
-        ServerPlayNetworking.send(player, new LODStreamSessionPayload(
-                session.dimension(),
-                session.streamEpoch(),
-                session.manifestRequestId(),
-                session.manifestRequired()
-        ));
+                tracker.getEffectiveRadius(config.maxClientVoxyRadius) >> 1);
+        if (ServerPlayNetworking.canSend(player, LODStreamSessionPayload.TYPE)) {
+            ServerPlayNetworking.send(player, new LODStreamSessionPayload(
+                    session.dimension(),
+                    session.streamEpoch(),
+                    session.manifestRequestId(),
+                    session.manifestRequired()
+            ));
+        }
     }
 
     public void shutdown() {
@@ -411,7 +415,11 @@ public class LodStreamingService {
 
             PlayerOutboundQueue.QueuedPacket polled = BandwidthThrottler.INSTANCE.pollPendingPacket(uuid);
             if (polled != null) {
-                ServerPlayNetworking.send(player, polled.payload());
+                if (ServerPlayNetworking.canSend(player, polled.payload().type())) {
+                    ServerPlayNetworking.send(player, polled.payload());
+                } else {
+                    tracker.completeBatch(polled.streamEpoch(), polled.batchId(), false, currentTick);
+                }
             }
         }
     }
@@ -445,15 +453,17 @@ public class LodStreamingService {
 
             tracker.updatePosition(player);
             ServerLevel level = player.level();
-            int manifestRadius = tracker.getEffectiveRadius(lodStreamRadius) >> 1;
+            int manifestRadius = tracker.getEffectiveRadius(config.maxClientVoxyRadius) >> 1;
             int manifestX = player.getBlockX() >> 5;
             int manifestZ = player.getBlockZ() >> 5;
             if (hashSyncEnabled && tracker.isActiveDimension(level.dimension().identifier())
                     && tracker.needsManifestRefresh(manifestX, manifestZ, manifestRadius, currentTick)) {
                 var session = tracker.refreshManifest(currentTick + MANIFEST_TIMEOUT_TICKS);
                 tracker.recordManifestArea(manifestX, manifestZ, manifestRadius);
-                ServerPlayNetworking.send(player, new LODStreamSessionPayload(
-                        session.dimension(), session.streamEpoch(), session.manifestRequestId(), true));
+                if (ServerPlayNetworking.canSend(player, LODStreamSessionPayload.TYPE)) {
+                    ServerPlayNetworking.send(player, new LODStreamSessionPayload(
+                            session.dimension(), session.streamEpoch(), session.manifestRequestId(), true));
+                }
             }
             WorldIdentifier worldId = WorldIdentifier.of(level);
             if (worldId == null) continue;
@@ -507,7 +517,9 @@ public class LodStreamingService {
         for (PlayerOutboundQueue.QueuedPacket pkt : cleared) {
             tracker.completeBatch(pkt.streamEpoch(), pkt.batchId(), false, currentTick);
         }
-        ServerPlayNetworking.send(player, LODClearPayload.clearDimension(dim));
+        if (ServerPlayNetworking.canSend(player, LODClearPayload.TYPE)) {
+            ServerPlayNetworking.send(player, LODClearPayload.clearDimension(dim));
+        }
         if (tracker.isProtocolOk()) {
             sendNewSession(player, tracker, dim);
         }
@@ -528,7 +540,9 @@ public class LodStreamingService {
                 tracker.completeBatch(pkt.streamEpoch(), pkt.batchId(), false, currentTick);
             }
             tracker.reset();
-            ServerPlayNetworking.send(player, LODClearPayload.clearDimension(dim));
+            if (ServerPlayNetworking.canSend(player, LODClearPayload.TYPE)) {
+                ServerPlayNetworking.send(player, LODClearPayload.clearDimension(dim));
+            }
             if (tracker.isProtocolOk()) {
                 sendNewSession(player, tracker, dim);
             }
@@ -550,7 +564,7 @@ public class LodStreamingService {
         int playerWorldSecX = snap.chunkX >> 1;
         int playerWorldSecZ = snap.chunkZ >> 1;
 
-        int effectiveRadius = tracker.getEffectiveRadius(lodStreamRadius);
+        int effectiveRadius = tracker.getEffectiveRadius(config.maxClientVoxyRadius);
         int effectiveMaxSections = Math.min(
                 tracker.getEffectiveMaxSections(maxSectionsPerTick),
                 tracker.remainingSectionCredit()
@@ -887,7 +901,7 @@ public class LodStreamingService {
         for (PlayerLodTracker tracker : trackers.values()) {
             if (!tracker.isReady() || !tracker.isProtocolOk() || !tracker.isLodEnabled()
                     || !tracker.isActiveDimension(dimension)) continue;
-            int radius = tracker.getEffectiveRadius(lodStreamRadius) >> 1;
+            int radius = tracker.getEffectiveRadius(config.maxClientVoxyRadius) >> 1;
             if (Math.abs(worldSecX - (tracker.getLastChunkX() >> 1)) > radius
                     || Math.abs(worldSecZ - (tracker.getLastChunkZ() >> 1)) > radius) continue;
             tracker.deferDirtySection(composite, sectionKey);

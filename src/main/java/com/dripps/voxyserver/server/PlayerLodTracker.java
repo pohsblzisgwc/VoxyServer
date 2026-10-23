@@ -474,12 +474,14 @@ public class PlayerLodTracker {
 
     // returns the clients preferred radius clamped to the server max, or server default if unset
     public int getEffectiveRadius(int serverMax) {
-        return (preferredRadius <= 0) ? serverMax : Math.min(preferredRadius, serverMax);
+        int max = (serverMax <= 0) ? 1024 : serverMax;
+        return (preferredRadius <= 0) ? max : Math.min(preferredRadius, max);
     }
 
     // returns the clients preferred rate clamped to the server max, or server default if unset
     public int getEffectiveMaxSections(int serverMax) {
-        return (preferredMaxSections <= 0) ? serverMax : Math.min(preferredMaxSections, serverMax);
+        int max = (serverMax <= 0) ? 100 : serverMax;
+        return (preferredMaxSections <= 0) ? max : Math.min(preferredMaxSections, max);
     }
 
     private void resetScanStateLocked() {
