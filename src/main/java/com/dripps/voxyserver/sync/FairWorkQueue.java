@@ -51,6 +51,12 @@ public final class FairWorkQueue<K, V> {
         turns.remove(key);
     }
 
+    public synchronized void clear() {
+        queues.clear();
+        turns.clear();
+        size = 0;
+    }
+
     public synchronized int size() {
         return size;
     }

@@ -32,6 +32,7 @@ final class SourceMaintenance {
     private List<Piece> pieces;
     private int cursor;
     private long snapshotStarted;
+    private volatile boolean stopped;
     volatile long updates, retries;
     long captureCount, captureNanos;
 
@@ -53,10 +54,12 @@ final class SourceMaintenance {
     }
 
     void mark(ServerLevel level, int x, int y, int z) {
+        if (stopped) return;
         dirty.mark(level, x, y, z, System.nanoTime());
     }
 
     boolean step(MinecraftServer server) {
+        if (stopped) return false;
         if (active == null) {
             active = dirty.poll(System.nanoTime());
             if (active == null) return false;
@@ -66,6 +69,10 @@ final class SourceMaintenance {
             var result = snapshot;
             server.execute(
                     () -> {
+                        if (stopped || result.isDone()) {
+                            result.cancel(false);
+                            return;
+                        }
                         long began = System.nanoTime();
                         try {
                             capture(work, result);
@@ -178,6 +185,7 @@ final class SourceMaintenance {
     private static void capture(
             DirtyRegionQueue.Work<ServerLevel> work, CompletableFuture<List<Piece>> result) {
         try {
+            if (result.isDone()) return;
             ServerLevel level = work.dimension();
             long key = work.node();
             int startX = WorldEngine.getX(key) * 2,
@@ -224,11 +232,12 @@ final class SourceMaintenance {
                                         .read(new ChunkPos(x, z))
                                         .thenApply(
                                                 optional -> {
+                                                    if (result.isDone()) return List.<Piece>of();
                                                     if (optional.isEmpty())
                                                         throw new CompletionException(
                                                                 new IOException(
                                                                         "dirty source chunk not"
-                                                                            + " saved yet: "
+                                                                                + " saved yet: "
                                                                                 + x
                                                                                 + ","
                                                                                 + z));
@@ -259,7 +268,7 @@ final class SourceMaintenance {
                                                         throw new CompletionException(
                                                                 new IOException(
                                                                         "dirty source sections not"
-                                                                            + " saved yet"));
+                                                                                + " saved yet"));
                                                     return list;
                                                 }));
                     }
@@ -267,6 +276,7 @@ final class SourceMaintenance {
             CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new))
                     .whenComplete(
                             (unused, error) -> {
+                                if (result.isDone()) return;
                                 if (error != null) result.completeExceptionally(error);
                                 else {
                                     var all = new ArrayList<Piece>();
@@ -284,6 +294,16 @@ final class SourceMaintenance {
         snapshot = null;
         pieces = null;
         cursor = 0;
+    }
+
+    void stopCaptures() {
+        stopped = true;
+    }
+
+    void release() {
+        if (snapshot != null) snapshot.cancel(false);
+        clearActive();
+        dirty.clear();
     }
 
     void resume(Map<String, ServerLevel> levels) {

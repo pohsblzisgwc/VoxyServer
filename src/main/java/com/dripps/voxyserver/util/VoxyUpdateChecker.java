@@ -20,7 +20,6 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
 
 public class VoxyUpdateChecker {
     private static final Logger LOGGER = LoggerFactory.getLogger("VoxyServer-Update");
@@ -31,23 +30,24 @@ public class VoxyUpdateChecker {
                          List<String> supportedVoxy, String currentVoxy) {}
 
     private static volatile Notice pendingNotice;
+    private static Thread updateThread;
 
     public static Notice getPendingNotice() {
         return pendingNotice;
     }
 
-    public static void checkForUpdates() {
+    public static synchronized void checkForUpdates() {
+        if (updateThread != null && updateThread.isAlive()) return;
         if (FabricLoader.getInstance().getEnvironmentType() != EnvType.SERVER) {
             return;
         }
-        CompletableFuture.runAsync(() -> {
-            try {
-                HttpClient client = HttpClient.newBuilder()
-                        .connectTimeout(Duration.ofSeconds(5))
-                        .build();
+        updateThread = new Thread(() -> {
+            try (HttpClient client = HttpClient.newBuilder()
+                    .connectTimeout(Duration.ofSeconds(5)).build()) {
 
                 HttpRequest request = HttpRequest.newBuilder()
                         .uri(URI.create(UPDATE_URL))
+                        .timeout(Duration.ofSeconds(5))
                         .header("User-Agent", "VoxyServer")
                         .GET()
                         .build();
@@ -57,6 +57,7 @@ public class VoxyUpdateChecker {
                     return;
                 }
 
+                if (Thread.currentThread().isInterrupted()) return;
                 JsonObject json = JsonParser.parseString(response.body()).getAsJsonObject();
                 String latestServerVer = json.get("latest_voxyserver").getAsString();
 
@@ -99,7 +100,28 @@ public class VoxyUpdateChecker {
             } catch (Exception e) {
                 LOGGER.debug("Could not check for VoxyServer updates.", e);
             }
-        });
+        }, "VoxyServer Update Check");
+        updateThread.setDaemon(true);
+        updateThread.setPriority(Thread.MIN_PRIORITY);
+        updateThread.start();
+    }
+
+    /** Interrupt the owned request and close its HttpClient; no shared executor is retained. */
+    public static synchronized void stop() {
+        if (updateThread != null) {
+            updateThread.interrupt();
+            boolean interrupted = false;
+            while (updateThread.isAlive()) {
+                try {
+                    updateThread.join();
+                } catch (InterruptedException e) {
+                    interrupted = true;
+                }
+            }
+            updateThread = null;
+            if (interrupted) Thread.currentThread().interrupt();
+        }
+        pendingNotice = null;
     }
 
     private static void logToConsole(boolean serverNeedsUpdate, boolean breaking, String latest, String current,

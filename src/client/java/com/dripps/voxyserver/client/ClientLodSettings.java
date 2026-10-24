@@ -12,7 +12,8 @@ import java.util.Locale;
 public final class ClientLodSettings {
     private static final ClientLodConfig CONFIG = ClientLodConfig.load();
     private static int serverMaxRadius = -1, serverMaxSections = -1, lastReportedRadius = -1;
-    private static volatile boolean protocolOk;
+    private static final com.dripps.voxyserver.sync.ProtocolActivation activation =
+            new com.dripps.voxyserver.sync.ProtocolActivation();
     private static volatile String cacheNamespace = "unbound";
     private static String activeServerKey;
     private static ClientLodConfig.Preferences activePreferences =
@@ -26,19 +27,28 @@ public final class ClientLodSettings {
         serverMaxRadius = -1;
         serverMaxSections = -1;
         lastReportedRadius = -1;
-        protocolOk = false;
+        activation.reset();
         ClientDemand.reset();
         activeServerKey = resolveCurrentServerKey();
         activePreferences = CONFIG.getPreferencesForServer(activeServerKey);
     }
 
     public static boolean isProtocolOk() {
-        return protocolOk;
+        return activation.compatible();
     }
 
-    public static void setProtocolOk(boolean value) {
-        protocolOk = value;
-        if (!value) ClientDemand.reset();
+    public static void sendHandshake() {
+        if (ClientPlayNetworking.canSend(LODHandshakePayload.TYPE)) {
+            activation.handshakeSent();
+            ClientPlayNetworking.send(
+                    new LODHandshakePayload(VoxyServerNetworking.PROTOCOL_VERSION));
+        }
+    }
+
+    public static void applyProtocol(int advertised) {
+        boolean request = activation.accept(advertised, VoxyServerNetworking.PROTOCOL_VERSION);
+        if (!activation.compatible()) ClientDemand.reset();
+        if (request) sendHandshake();
     }
 
     public static void applyServerSettings(int radius, int sections) {
@@ -59,7 +69,7 @@ public final class ClientLodSettings {
     }
 
     public static void onClientTick() {
-        if (protocolOk && Minecraft.getInstance().getConnection() != null) {
+        if (activation.compatible() && Minecraft.getInstance().getConnection() != null) {
             int radius = resolveVoxyPreferredRadius();
             if (radius > 0 && radius != lastReportedRadius) {
                 lastReportedRadius = radius;
@@ -139,7 +149,7 @@ public final class ClientLodSettings {
     }
 
     public static void sendPreferences() {
-        if (!protocolOk || Minecraft.getInstance().getConnection() == null) return;
+        if (!activation.compatible() || Minecraft.getInstance().getConnection() == null) return;
         int radius = resolveVoxyPreferredRadius();
         lastReportedRadius = radius;
         ClientPlayNetworking.send(

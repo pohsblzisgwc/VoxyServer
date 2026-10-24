@@ -20,6 +20,8 @@ public abstract class ChunkSectionSnapshotMixin {
                     "setBlockState(IIILnet/minecraft/world/level/block/state/BlockState;Z)Lnet/minecraft/world/level/block/state/BlockState;")
     private BlockState voxyserver$write(
             int x, int y, int z, BlockState state, boolean lock, Operation<BlockState> original) {
+        if (!com.dripps.voxyserver.Voxyserver.sourceSnapshotsEnabled())
+            return original.call(x, y, z, state, lock);
         synchronized (this) {
             return original.call(x, y, z, state, lock);
         }
@@ -28,6 +30,10 @@ public abstract class ChunkSectionSnapshotMixin {
     @WrapMethod(method = "fillBiomesFromNoise")
     private void voxyserver$biomes(
             BiomeResolver resolver, int x, int y, int z, Operation<Void> original) {
+        if (!com.dripps.voxyserver.Voxyserver.sourceSnapshotsEnabled()) {
+            original.call(resolver, x, y, z);
+            return;
+        }
         synchronized (this) {
             original.call(resolver, x, y, z);
         }

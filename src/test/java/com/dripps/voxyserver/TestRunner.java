@@ -14,9 +14,10 @@ public class TestRunner {
         System.out.println("=================================================\n");
 
         int passedSuites = 0;
-        int totalSuites = 18;
+        int totalSuites = 19;
 
         try {
+            RuntimeLifecycleTest.runAllTests();passedSuites++;
             GenerationRateBudgetTest.runAllTests();passedSuites++;
             CommandPermissionTest.runAllTests();passedSuites++;
             BackgroundGenerationTest.runAllTests();passedSuites++;

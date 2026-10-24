@@ -95,6 +95,7 @@ config file is generated at `config/voxyserver.json` on first run.
 
 | option | default | description |
 |--------|---------|-------------|
+| `enabled` | `true` | global runtime switch; false drains and closes all owned services, workers and queues |
 | `maxClientVoxyRadius` / `lodStreamRadius` | `1024` | maximum remote radius in Minecraft chunks; validated legacy aliases |
 | `maxSectionsPerTickPerPlayer` | `100` | per-player send limit, further capped by client preference |
 | `sectionsPerPacket` | `16` | native nodes per packet; the wire hard cap remains 16 |
@@ -116,9 +117,25 @@ config file is generated at `config/voxyserver.json` on first run.
 
 Old `tickInterval`, `dirtyTrackingInterval`, `enableDistancePacing`, `enableRegionHashSync`, `hashRecheckIntervalTicks` and `manifestRefreshIntervalTicks` fields remain accepted and validated for configuration compatibility. Protocol 5 uses client render demand, native LOD selection and the maintenance settings above instead of those scanner/inventory schedules.
 
-Configuration is validated before application or saving. Invalid startup files produce field-specific diagnostics and use validated defaults without overwriting the file. Invalid reloads retain the current validated configuration; commands and saves use the same validation guard. Changing chunk lifecycle generation flags or enabling/disabling dirty tracking still requires a restart.
+Configuration is validated before application or saving. Invalid startup files produce field-specific diagnostics and use validated defaults without overwriting the file. Invalid reloads retain the current validated configuration; commands and saves use the same validation guard. Changing chunk lifecycle generation flags or enabling/disabling dirty tracking still requires a runtime restart (disable, then enable) or server restart.
 
 In v1.2.7 all defaults stay unchanged. Workload/timing integer settings now accept positive 32-bit values (up to 2,147,483,647); bandwidth, quiet/cooldown times and background delay/hold/backlog/history/recheck accept zero as documented. Generation starts accept 1..600000 per minute. The view protocol still limits radius to 4096, packets to 16 nodes, and queues retain their byte/packet caps. Voxy service threads accept 1..10000 because the native pool's shutdown releases 10000 permits. These technical bounds remain enforced.
+
+### global runtime switch
+
+```text
+/voxyserver enabled false
+/voxyserver enabled true
+/voxyserver enabled
+```
+
+These administrator-only commands stop, start and query the dedicated-server runtime. `/voxyserver config set enabled false` / `true` are equivalent. The default is `true`; the value is saved to `config/voxyserver.json`. With `enabled=false` at startup, no VoxyServer engine, maintenance/storage worker, importer, generator, update-check request or config-file poll is started.
+
+Disabling detaches event/network admission first, releases owned generation tickets, stops imports, checkpoints unfinished dirty work, drains the maintenance worker, clears subscriptions, ACK/batch state and bandwidth queues, then closes the Voxy engine/storage pool. Dirty hooks return immediately and source snapshot writer monitors are bypassed after draining. Permanent event bridges and command/payload registrations are installed once and retain no stopped runtime; repeated enable/disable does not accumulate handlers. Commands return after owned shutdown work finishes; checkpoint/storage flushes can take time. A failed shutdown blocks creation of replacement workers until a server restart and reports an error.
+
+While disabled there are **no VoxyServer background jobs, hash scans, world generation, data streams, periodic config reads or update requests** on the server. Classes, commands, payload registration and constant-time event/null checks (plus a pause reply to an explicit handshake) still occupy a small amount of memory/CPU: a loaded, reversible mod cannot honestly promise literal zero resources. Already dispatched shared vanilla generation/I/O may finish; it is not forcibly interrupted. One-time draining/checkpoint/notification work is part of shutdown. This switch controls VoxyServer's server runtime, not ordinary client Voxy rendering/cache ownership.
+
+Because disabled mode does not poll the filesystem, re-enable with the command, or edit the file and run `/voxyserver reload`, or restart the server. Re-enabling recreates services and gives compatible **v1.2.7 clients** a new handshake/session without erasing their stored terrain. Protocol 5's existing integer advertisement uses `0` to pause and the matching version to resume; the wire layout stays unchanged. Older clients may need to reconnect after re-enable. Stored LOD/dirty journals remain on disk. Block changes made while the mod is completely off are not recorded or retroactively rebuilt; later chunk load/unload updates, imports or newly marked source work refresh that terrain. No full-world scan runs on re-enable. Singleplayer/LAN runtime support is unchanged.
 
 ### maintenance and memory
 
@@ -180,7 +197,7 @@ The sampler observes the maximum of the current measured tick, vanilla average M
 
 Minecraft generates dependency halos for a target; the configured radii/rate count **requested target chunks**, not every neighbor generated by the native pipeline. Native generation and synchronous ticket-graph setup can exceed the scheduler's soft allowance; the generator is not a hard CPU/MSPT guarantee. After ticket setup, load is sampled again and excessive tick time immediately closes admission. Large modded generators require correspondingly conservative settings. `/voxyserver stats` reports scheduler state, MSPT, completed targets, tickets, draining jobs and failures. Debug reports additionally include probes/skips, starts/completions, failures/last error, cancellations/timeouts, live tickets and canceled-but-draining jobs.
 
-The scheduler regression simulates 1,200 ticks with concurrent jobs and a high-MSPT interval, verifies default-rate spacing and high-rate batches, immediate ticket release, finite timeouts, retained concurrency debt and recovery, and covers late I/O/native completions, hot reload, candidate bounds and coordinate arithmetic. A separate rate regression executes 600,000 admissions across 1,200 simulated ticks. Native pre-launch checks validate ticket flags, renewal and release isolation. Actual chunk generation under a running server and its sustained MSPT/storage effects have **not** been load-tested here.
+The scheduler regression simulates 1,200 ticks with concurrent jobs and a high-MSPT interval, verifies default-rate spacing and high-rate batches, immediate ticket release, finite timeouts, retained concurrency debt and recovery, and covers late I/O/native completions, hot reload, candidate bounds and coordinate arithmetic. A separate rate regression executes 600,000 admissions across 1,200 simulated ticks. Native pre-launch checks validate ticket flags, renewal and release isolation. Lifecycle regressions cover 100 logical restart cycles and three actual native engine/maintenance restarts, including worker termination and dirty checkpoint preservation. Actual chunk generation under a running server and its sustained MSPT/storage effects have **not** been load-tested here.
 
 ### 中文命令速查
 
@@ -192,6 +209,18 @@ The scheduler regression simulates 1,200 ticks with concurrent jobs and a high-M
 
 #### 查看、修改、保存与重载
 
+总开关默认开启，关闭和恢复使用：
+
+```text
+/voxyserver enabled false
+/voxyserver enabled true
+/voxyserver enabled
+```
+
+分别为完全停止服务端运行实例、重新创建实例、查询开关。等价配置项是 `enabled`，例如 `/voxyserver config set enabled false`。关闭会收尾导入、保存待维护日志、停止自有线程、清空运行队列并释放自有票据；客户端已有地形和服务端磁盘数据保留。关闭期间不自动检查配置文件，也不检查更新；编辑配置后需手动 `/voxyserver reload` 才能恢复。
+
+这里“完全关闭”指没有模组后台任务和数据流。已加载的类、管理命令与事件入口仍有少量常驻内存和判断成本；原版已派发的共享任务不能强杀。关闭命令会等待自有任务和存储收尾，不承诺零耗时。关闭期间发生的方块变化不会被记录，恢复时不全图回扫；相关数据会随后续源更新或管理员导入刷新。在线恢复建议两端使用 v1.2.7，旧客户端可能需要重连。集成端支持保持原样。
+
 | 命令 | 作用 |
 |------|------|
 | `/voxyserver config list` | 列出全部配置、当前值，以及是否需要重启 |
@@ -201,9 +230,10 @@ The scheduler regression simulates 1,200 ticks with concurrent jobs and a high-M
 | `/voxyserver stats` | 查看一次同步及旁路生成状态 |
 | `/voxyserver stats continuous` | 持续接收状态信息（游戏内玩家专用） |
 | `/voxyserver stats stop` | 停止持续接收状态信息（游戏内玩家专用） |
+| `/voxyserver enabled [true\|false]` | 查询或修改全局总开关，保存并立即停止/恢复运行实例 |
 | `/voxyserver help` | 查看命令帮助 |
 
-配置文件也会被定期检查。无效热重载保留当前有效配置，无效命令不会保存；不会因为填错数值而静默采用它。所有旁路选项均支持热更新。**修改旁路选项会撤销当前旁路任务并重新检查恢复条件；仅修改旁路选项不会重置所有玩家的 LOD 同步会话。**
+总开关开启时，配置文件也会被定期检查。无效热重载保留当前有效配置，无效命令不会保存；不会因为填错数值而静默采用它。所有旁路选项均支持热更新。**修改旁路选项会撤销当前旁路任务并重新检查恢复条件；仅修改旁路选项不会重置所有玩家的 LOD 同步会话。**
 
 时间单位不要混用：`Ticks` 在 20 TPS 时是每秒 20 tick，卡顿或修改 tick rate 后换算会变化；`Seconds` / `Millis` 是秒 / 毫秒。半径使用 Minecraft 区块，**1 区块 = 16 方块**。生成速率使用实际时间，在服务器加速 tick 时也不会积累补发额度。
 
@@ -288,9 +318,9 @@ The scheduler regression simulates 1,200 ticks with concurrent jobs and a high-M
 | Voxy 存储/服务线程数 | `/voxyserver threads 3` | 默认 3；范围 1–10000，等价修改 `workerThreads`；不会把单个维护调度器改为多个线程 |
 | 诊断日志开关 | `/voxyserver config set debugTrackingEnabled true` | 默认 `false`；开启后输出维护和旁路统计，关闭使用 `false` |
 | 诊断日志间隔 | `/voxyserver config set debugTrackingInterval 200` | 默认 200 tick，20 TPS 时约 10 秒；至少 1 |
-| 普通区块加载时入队 LOD | `/voxyserver config set generateOnChunkLoad true` | 默认 `true`，需重启；旁路自身成功完成后仍会显式入队源数据 |
-| 普通区块卸载时入队 LOD | `/voxyserver config set generateOnChunkUnload true` | 默认 `true`，需重启 |
-| 日常方块/光照/生物群系变化跟踪 | `/voxyserver config set dirtyTrackingEnabled true` | 默认 `true`，需重启；关闭会影响日常 LOD 内容更新 |
+| 普通区块加载时入队 LOD | `/voxyserver config set generateOnChunkLoad true` | 默认 `true`，需重启运行实例或服务器；旁路自身成功完成后仍会显式入队源数据 |
+| 普通区块卸载时入队 LOD | `/voxyserver config set generateOnChunkUnload true` | 默认 `true`，需重启运行实例或服务器 |
+| 日常方块/光照/生物群系变化跟踪 | `/voxyserver config set dirtyTrackingEnabled true` | 默认 `true`，需重启运行实例或服务器；关闭会影响日常 LOD 内容更新 |
 
 上表使用简写命令的选项也都可用统一格式，例如 `/voxyserver config set maxBandwidthBytesPerSec 250000`、`/voxyserver config set workerThreads 3`。`/voxyserver radius`、`/voxyserver bandwidth`、`/voxyserver threads`、`/voxyserver hashsync` 不带末尾值时表示查询。
 

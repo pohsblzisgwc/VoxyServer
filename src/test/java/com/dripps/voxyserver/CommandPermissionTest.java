@@ -20,6 +20,10 @@ public final class CommandPermissionTest {
         String[] commands = {
             "voxyserver",
             "voxyserver help",
+            "voxyserver enabled",
+            "voxyserver enabled false",
+            "voxyserver enabled true",
+            "voxyserver config set enabled false",
             "voxyserver reload",
             "voxyserver config list",
             "voxyserver config get backgroundGenerationChunksPerMinute",
@@ -74,7 +78,7 @@ public final class CommandPermissionTest {
         }
         System.out.println(
                 "PASS CommandPermissionTest: registered Brigadier tree denies non-admin queries,"
-                    + " changes, import and stats; admin/owner high-limit commands accepted");
+                        + " changes, import and stats; admin/owner high-limit commands accepted");
     }
 
     private static void require(boolean ok, String message) {

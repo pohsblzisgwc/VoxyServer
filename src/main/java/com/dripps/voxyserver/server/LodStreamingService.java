@@ -9,7 +9,6 @@ import com.dripps.voxyserver.util.HashWorkBudget;
 
 import me.cortex.voxy.commonImpl.WorldIdentifier;
 
-import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.networking.v1.*;
 import net.minecraft.core.Registry;
 import net.minecraft.core.registries.Registries;
@@ -49,6 +48,7 @@ public final class LodStreamingService {
     private final ConcurrentHashMap<GroupId, Boolean> changed = new ConcurrentHashMap<>();
     private long sentNodes, summaryMatches, detailRequests, requestsRejected;
     private boolean started, preferIndex;
+    private volatile boolean closed;
     private long lastLeaseSweep, workTurn, lastCheckpoint;
     private volatile long workerCpuNanos, workerWallNanos, workerCycles, maxQuantumNanos;
     private final java.lang.management.ThreadMXBean cpu =
@@ -125,78 +125,123 @@ public final class LodStreamingService {
                 });
     }
 
-    public void register() {
+    /** Register once; callbacks retain only the owner lookup, never a stopped world/runtime. */
+    public static void registerHandlers(java.util.function.Supplier<LodStreamingService> active) {
         ServerPlayConnectionEvents.JOIN.register(
                 (handler, sender, server) -> {
-                    var player = handler.getPlayer();
-                    players.put(player.getUUID(), new State(player.getUUID()));
-                    BandwidthThrottler.INSTANCE.registerPlayer(
-                            player.getUUID(), config.maxBandwidthBytesPerSec);
+                    var service = active.get();
+                    if (service != null) service.onJoin(handler.getPlayer());
                 });
         ServerPlayConnectionEvents.DISCONNECT.register(
                 (handler, server) -> {
-                    var state = players.remove(handler.getPlayer().getUUID());
-                    if (state != null) closeState(state);
-                    BandwidthThrottler.INSTANCE.unregisterPlayer(handler.getPlayer().getUUID());
+                    var service = active.get();
+                    if (service != null) service.onDisconnect(handler.getPlayer());
                 });
         ServerPlayNetworking.registerGlobalReceiver(
                 LODHandshakePayload.TYPE,
-                (payload, ctx) -> {
-                    var state = players.get(ctx.player().getUUID());
-                    if (state == null) return;
-                    state.tracker.setReady(true);
-                    state.tracker.setProtocolOk(
-                            payload.protocol() == VoxyServerNetworking.PROTOCOL_VERSION);
-                    if (ServerPlayNetworking.canSend(ctx.player(), LODProtocolPayload.TYPE))
-                        ServerPlayNetworking.send(
-                                ctx.player(),
-                                new LODProtocolPayload(VoxyServerNetworking.PROTOCOL_VERSION));
-                    if (state.tracker.isProtocolOk()) {
-                        sendSettings(ctx.player());
-                        newSession(ctx.player(), state);
-                    }
+                (p, ctx) -> {
+                    var service = active.get();
+                    if (service != null) service.onHandshake(ctx.player(), p);
+                    else if (ServerPlayNetworking.canSend(ctx.player(), LODProtocolPayload.TYPE))
+                        ServerPlayNetworking.send(ctx.player(), new LODProtocolPayload(0));
                 });
         ServerPlayNetworking.registerGlobalReceiver(
                 LODPreferencesPayload.TYPE,
                 (p, ctx) -> {
-                    var state = players.get(ctx.player().getUUID());
-                    if (state == null) return;
-                    state.tracker.setLodEnabled(p.enabled());
-                    state.tracker.setPreferredRadius(p.lodStreamRadius());
-                    state.tracker.setPreferredMaxSections(p.maxSectionsPerTick());
-                    if (state.tracker.isReady() && state.tracker.isProtocolOk())
-                        newSession(ctx.player(), state);
+                    var service = active.get();
+                    if (service != null) service.onPreferences(ctx.player(), p);
                 });
         ServerPlayNetworking.registerGlobalReceiver(
-                LODDemandPayload.TYPE, (p, ctx) -> receive(ctx.player(), p));
+                LODDemandPayload.TYPE,
+                (p, ctx) -> {
+                    var service = active.get();
+                    if (service != null) service.receive(ctx.player(), p);
+                });
         ServerPlayNetworking.registerGlobalReceiver(
                 LODBatchResultPayload.TYPE,
                 (p, ctx) -> {
-                    var state = players.get(ctx.player().getUUID());
-                    if (state == null) return;
-                    synchronized (state) {
-                        if (!state.tracker.completeDemandBatch(
-                                p.streamEpoch(),
-                                p.batchId(),
-                                p.status() == LODBatchResultPayload.SUCCESS,
-                                tick)) return;
-                        Delivery delivered = state.deliveries.remove(p.batchId());
-                        if (delivered == null) return;
-                        Gate gate = state.groups.get(delivered.group);
-                        if (gate != null && gate.request == delivered.request) {
-                            if (p.status() == LODBatchResultPayload.SUCCESS) {
-                                gate.confirm(delivered.request, delivered.slots, true);
-                                gate.attempts = 0;
-                            } else {
-                                gate.nextSend = System.nanoTime() + 5_000_000_000L;
-                                gate.attempts++;
-                            }
-                            schedule(state, delivered.group, gate);
-                        }
-                    }
+                    var service = active.get();
+                    if (service != null) service.onBatchResult(ctx.player(), p);
                 });
-        ServerTickEvents.END_SERVER_TICK.register(this::onTick);
+    }
+
+    public void start(MinecraftServer server) {
+        this.server = server;
+        for (var player : server.getPlayerList().getPlayers()) {
+            onJoin(player);
+            // A version advertisement resumes a paused upgraded client, which re-handshakes.
+            if (ServerPlayNetworking.canSend(player, LODProtocolPayload.TYPE))
+                ServerPlayNetworking.send(
+                        player, new LODProtocolPayload(VoxyServerNetworking.PROTOCOL_VERSION));
+        }
+        startWorker();
+    }
+
+    void startWorker() {
         worker.scheduleWithFixedDelay(this::cycle, 50, 50, TimeUnit.MILLISECONDS);
+    }
+
+    private void onJoin(ServerPlayer player) {
+        players.put(player.getUUID(), new State(player.getUUID()));
+        BandwidthThrottler.INSTANCE.registerPlayer(
+                player.getUUID(), config.maxBandwidthBytesPerSec);
+    }
+
+    private void onDisconnect(ServerPlayer player) {
+        var state = players.remove(player.getUUID());
+        if (state != null) closeState(state);
+        BandwidthThrottler.INSTANCE.unregisterPlayer(player.getUUID());
+    }
+
+    private void onHandshake(ServerPlayer player, LODHandshakePayload payload) {
+
+        var state = players.get(player.getUUID());
+        if (state == null) return;
+        state.tracker.setReady(true);
+        state.tracker.setProtocolOk(payload.protocol() == VoxyServerNetworking.PROTOCOL_VERSION);
+        if (ServerPlayNetworking.canSend(player, LODProtocolPayload.TYPE))
+            ServerPlayNetworking.send(
+                    player, new LODProtocolPayload(VoxyServerNetworking.PROTOCOL_VERSION));
+        if (state.tracker.isProtocolOk()) {
+            sendSettings(player);
+            newSession(player, state);
+        }
+    }
+
+    private void onPreferences(ServerPlayer player, LODPreferencesPayload p) {
+
+        var state = players.get(player.getUUID());
+        if (state == null) return;
+        state.tracker.setLodEnabled(p.enabled());
+        state.tracker.setPreferredRadius(p.lodStreamRadius());
+        state.tracker.setPreferredMaxSections(p.maxSectionsPerTick());
+        if (state.tracker.isReady() && state.tracker.isProtocolOk()) newSession(player, state);
+    }
+
+    private void onBatchResult(ServerPlayer player, LODBatchResultPayload p) {
+
+        var state = players.get(player.getUUID());
+        if (state == null) return;
+        synchronized (state) {
+            if (!state.tracker.completeDemandBatch(
+                    p.streamEpoch(),
+                    p.batchId(),
+                    p.status() == LODBatchResultPayload.SUCCESS,
+                    tick)) return;
+            Delivery delivered = state.deliveries.remove(p.batchId());
+            if (delivered == null) return;
+            Gate gate = state.groups.get(delivered.group);
+            if (gate != null && gate.request == delivered.request) {
+                if (p.status() == LODBatchResultPayload.SUCCESS) {
+                    gate.confirm(delivered.request, delivered.slots, true);
+                    gate.attempts = 0;
+                } else {
+                    gate.nextSend = System.nanoTime() + 5_000_000_000L;
+                    gate.attempts++;
+                }
+                schedule(state, delivered.group, gate);
+            }
+        }
     }
 
     private void receive(ServerPlayer player, LODDemandPayload p) {
@@ -577,8 +622,10 @@ public final class LodStreamingService {
         if (current == null) return;
         current.execute(
                 () -> {
+                    if (closed) return;
                     ServerPlayer p = current.getPlayerList().getPlayer(state.id);
-                    if (p != null
+                    if (!closed
+                            && p != null
                             && players.get(state.id) == state
                             && reply.epoch() == state.tracker.streamEpoch()
                             && p.level().dimension().identifier().equals(reply.dimension()))
@@ -587,7 +634,7 @@ public final class LodStreamingService {
     }
 
     private void cycle() {
-        if (server == null) return;
+        if (closed || server == null) return;
         long cycleStarted = System.nanoTime(),
                 cpuStarted =
                         cpu.isCurrentThreadCpuTimeSupported() ? cpu.getCurrentThreadCpuTime() : 0;
@@ -595,11 +642,13 @@ public final class LodStreamingService {
             long now = System.nanoTime();
             int idleTurns = 0;
             // Yield between maintenance turns even when the administrator grants >=1 s/s.
-            while (now-cycleStarted<50_000_000L && heavyBudget.tryAcquire(
-                    now / 50_000_000L,
-                    20,
-                    Integer.MAX_VALUE,
-                    TimeUnit.MILLISECONDS.toNanos(config.maintenanceMillisPerSecond))) {
+            while (!closed
+                    && now - cycleStarted < 50_000_000L
+                    && heavyBudget.tryAcquire(
+                            now / 50_000_000L,
+                            20,
+                            Integer.MAX_VALUE,
+                            TimeUnit.MILLISECONDS.toNanos(config.maintenanceMillisPerSecond))) {
                 long began = System.nanoTime();
                 boolean did = false;
                 switch ((int) (workTurn++ % 5)) {
@@ -699,7 +748,8 @@ public final class LodStreamingService {
             }
     }
 
-    private void onTick(MinecraftServer server) {
+    public void onTick(MinecraftServer server) {
+        if (closed) return;
         this.server = server;
         tick++;
         if (!started) {
@@ -804,10 +854,12 @@ public final class LodStreamingService {
                         config.maxClientVoxyRadius, config.maxSectionsPerTickPerPlayer));
     }
 
-    public int pendingSourceSections() {return source.dirty.dirtyCells();}
+    public int pendingSourceSections() {
+        return source.dirty.dirtyCells();
+    }
 
     public void markSourceDirty(ServerLevel level, int blockX, int blockY, int blockZ) {
-        source.mark(level, blockX, blockY, blockZ);
+        if (!closed) source.mark(level, blockX, blockY, blockZ);
     }
 
     public void onDimensionChange(ServerPlayer player, ServerLevel destination) {
@@ -841,6 +893,20 @@ public final class LodStreamingService {
     }
 
     public void shutdown() {
+        if (closed) return;
+        closed = true;
+        source.stopCaptures();
+        if (server != null)
+            for (var player : server.getPlayerList().getPlayers()) {
+                try {
+                    if (ServerPlayNetworking.canSend(player, LODProtocolPayload.TYPE))
+                        ServerPlayNetworking.send(player, new LODProtocolPayload(0));
+                } catch (RuntimeException failure) {
+                    // A disappearing connection must never prevent worker/storage shutdown.
+                    Voxyserver.LOGGER.warn(
+                            "Could not notify {} of disabled streaming", player.getUUID(), failure);
+                }
+            }
         worker.execute(source::checkpoint);
         worker.shutdown();
         boolean interrupted = false;
@@ -851,8 +917,21 @@ public final class LodStreamingService {
                 interrupted = true;
             }
         if (interrupted) Thread.currentThread().interrupt();
-        for (var state : players.values()) closeState(state);
+        for (var state : players.values()) {
+            closeState(state);
+            BandwidthThrottler.INSTANCE.unregisterPlayer(state.id);
+        }
+        players.clear();
+        requests.clear();
+        ready.clear();
+        subscriptions.clear();
+        changed.clear();
+        notifying = null;
+        notifyingGroup = null;
+        source.release();
         index.clear();
+        engine.setDirtySectionListener(null);
+        server = null;
     }
 
     public record PlayerStat(String name, int sentCount, int chunkX, int chunkZ) {}

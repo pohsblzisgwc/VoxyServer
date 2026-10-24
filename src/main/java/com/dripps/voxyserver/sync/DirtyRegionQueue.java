@@ -203,6 +203,15 @@ public final class DirtyRegionQueue<D> {
         }
     }
 
+    /** Called only after all producers and the maintenance worker have stopped. */
+    public void clear() {
+        roots.clear();
+        incoming.clear();
+        turns.clear();
+        cooldowns.clear();
+        count.set(0);
+    }
+
     public int roots() {
         return roots.size();
     }

@@ -34,6 +34,9 @@ public final class NativeLodIntegrationTest {
     public static void runAllTests() throws Exception {
         SharedConstants.tryDetectVersion();
         Bootstrap.bootStrap();
+        if (net.fabricmc.loader.api.FabricLoader.getInstance().getEnvironmentType()
+                == net.fabricmc.api.EnvType.SERVER)
+            com.dripps.voxyserver.server.NativeRuntimeLifecycleTest.run();
         com.dripps.voxyserver.server.background.BackgroundChunkGeneration.registerTicketType();
         var backgroundTicket =
                 com.dripps.voxyserver.server.background.BackgroundChunkGeneration.ticketType();
@@ -44,7 +47,7 @@ public final class NativeLodIntegrationTest {
                         && !backgroundTicket.canExpireIfUnloaded()
                         && backgroundTicket.timeout() > 0,
                 "background generation ticket can persist, tick entities, or expire before"
-                    + " loading");
+                        + " loading");
         require(
                 !backgroundTicket.equals(TicketType.PLAYER_LOADING),
                 "background ticket aliases player loading");
@@ -80,6 +83,7 @@ public final class NativeLodIntegrationTest {
                         "me.cortex.voxy.common.world.WorldUpdater"))
             Class.forName(name, false, NativeLodIntegrationTest.class.getClassLoader());
         var registry = biomes();
+        snapshotLockSwitch(registry);
         var server = new WorldEngine(new MemoryStorage());
         var client = new WorldEngine(new MemoryStorage());
         configure(server);
@@ -201,6 +205,77 @@ public final class NativeLodIntegrationTest {
         } finally {
             server.free();
             client.free();
+        }
+    }
+
+    private static void snapshotLockSwitch(Registry<Biome> biomes) throws Exception {
+        var factory =
+                net.minecraft.world.level.chunk.PalettedContainerFactory.create(
+                        new RegistryAccess.ImmutableRegistryAccess(List.of(biomes)));
+        var section = new net.minecraft.world.level.chunk.LevelChunkSection(factory);
+        var configField = Voxyserver.class.getDeclaredField("config");
+        configField.setAccessible(true);
+        var saved = configField.get(null);
+        try {
+            for (boolean enabled : new boolean[] {true, false}) {
+                // Null configuration is the pre-launch active-lock fixture; disabled config uses
+                // the real fast path.
+                var c = new com.dripps.voxyserver.config.VoxyServerConfig();
+                c.enabled = false;
+                configField.set(null, enabled ? null : c);
+                var entered = new java.util.concurrent.CountDownLatch(1);
+                var finished = new java.util.concurrent.CountDownLatch(1);
+                var failure = new java.util.concurrent.atomic.AtomicReference<Throwable>();
+                var writer =
+                        new Thread(
+                                () -> {
+                                    entered.countDown();
+                                    try {
+                                        section.setBlockState(
+                                                0,
+                                                0,
+                                                0,
+                                                enabled
+                                                        ? Blocks.STONE.defaultBlockState()
+                                                        : Blocks.DIRT.defaultBlockState(),
+                                                true);
+                                    } catch (Throwable error) {
+                                        failure.set(error);
+                                    } finally {
+                                        finished.countDown();
+                                    }
+                                });
+                try {
+                    synchronized (section) {
+                        writer.start();
+                        require(
+                                entered.await(2, java.util.concurrent.TimeUnit.SECONDS),
+                                "native writer did not start");
+                        if (enabled) {
+                            long deadline = System.nanoTime() + 2_000_000_000L;
+                            while (writer.getState() != Thread.State.BLOCKED
+                                    && writer.isAlive()
+                                    && System.nanoTime() < deadline) Thread.yield();
+                            require(
+                                    writer.getState() == Thread.State.BLOCKED,
+                                    "enabled source write bypassed snapshot monitor");
+                        } else
+                            require(
+                                    finished.await(2, java.util.concurrent.TimeUnit.SECONDS),
+                                    "disabled source write still took snapshot monitor");
+                    }
+                } finally {
+                    writer.join(3000);
+                }
+                require(
+                        !writer.isAlive() && failure.get() == null,
+                        "native snapshot lock test failed: " + failure.get());
+            }
+            System.out.println(
+                    "PASS native global-switch writer guard: enabled writers synchronize; disabled"
+                        + " writers bypass the extra monitor");
+        } finally {
+            configField.set(null, saved);
         }
     }
 

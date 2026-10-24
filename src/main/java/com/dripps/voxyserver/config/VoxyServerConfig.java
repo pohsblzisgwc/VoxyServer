@@ -20,6 +20,7 @@ public class VoxyServerConfig {
     // Upstream UnifiedServiceThreadPool.shutdown releases 10,000 worker permits.
     public static final int MAX_NATIVE_WORKER_THREADS = 10_000;
 
+    public boolean enabled = true;
     public int maxClientVoxyRadius = 1024;
     public int lodStreamRadius = 1024;
     public int maxSectionsPerTickPerPlayer = 100;

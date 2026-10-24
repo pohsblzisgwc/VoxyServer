@@ -23,9 +23,11 @@ public abstract class ServerLightUpdateMixin {
 
     @Inject(method = "onLightUpdate", at = @At("HEAD"))
     private void voxyserver$light(LightLayer layer, SectionPos pos, CallbackInfo ci) {
+        var tracker = DirtyTracker.INSTANCE;
+        if (tracker == null) return;
         var level = (ServerLevel) getLevel();
         int y = pos.y() << 4;
-        if (y >= level.getMinY() && y < level.getMaxY() && DirtyTracker.INSTANCE != null)
-            DirtyTracker.INSTANCE.markDirty(level, pos.x(), y, pos.z());
+        if (y >= level.getMinY() && y < level.getMaxY())
+            tracker.markDirty(level, pos.x(), y, pos.z());
     }
 }

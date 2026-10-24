@@ -20,15 +20,20 @@ public final class ChunkVoxelizer {
         this.config = config;
     }
 
-    public void register() {
-        if (config.generateOnChunkLoad)
-            ServerChunkEvents.CHUNK_LOAD.register((level, chunk, unused) -> mark(level, chunk));
+    public static void registerHandlers(java.util.function.Supplier<ChunkVoxelizer> active) {
+        ServerChunkEvents.CHUNK_LOAD.register(
+                (level, chunk, unused) -> {
+                    var current = active.get();
+                    if (current != null && current.config.generateOnChunkLoad)
+                        current.mark(level, chunk);
+                });
         ServerChunkEvents.CHUNK_UNLOAD.register(
                 (level, chunk) -> {
-                    // Capture the final state through the vanilla I/O worker after unload, without
-                    // pinning chunks.
-                    if (config.generateOnChunkUnload || config.dirtyTrackingEnabled)
-                        mark(level, chunk);
+                    var current = active.get();
+                    if (current != null
+                            && (current.config.generateOnChunkUnload
+                                    || current.config.dirtyTrackingEnabled))
+                        current.mark(level, chunk);
                 });
     }
 

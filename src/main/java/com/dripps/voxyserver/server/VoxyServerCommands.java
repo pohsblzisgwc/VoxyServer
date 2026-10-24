@@ -41,6 +41,10 @@ public final class VoxyServerCommands {
                 Commands.literal("voxyserver")
                         .requires(VoxyServerCommands::isAdministrator)
                         .executes(context -> showHelp(context.getSource()))
+                        .then(Commands.literal("enabled")
+                                .executes(context -> configGet(context.getSource(),"enabled"))
+                                .then(Commands.argument("value",BoolArgumentType.bool())
+                                        .executes(context -> configSet(context.getSource(),mod,"enabled",String.valueOf(BoolArgumentType.getBool(context,"value"))))))
                         .then(Commands.literal("help")
                                 .executes(context -> showHelp(context.getSource())))
                         .then(Commands.literal("reload")
@@ -321,6 +325,7 @@ public final class VoxyServerCommands {
     private static int showHelp(CommandSourceStack source) {
         VoxyServerConfig cfg = Voxyserver.getConfig();
         MutableComponent out = Component.literal("=== VoxyServer Admin Commands ===").withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD);
+        out.append(Component.literal("\n/voxyserver enabled [true|false] - Start or fully stop the server runtime").withStyle(ChatFormatting.YELLOW));
         out.append(Component.literal("\n/voxyserver radius [chunks] ").withStyle(ChatFormatting.YELLOW))
                 .append(Component.literal("- Get or set client LOD view radius (1-4096)").withStyle(ChatFormatting.GRAY));
         out.append(Component.literal("\n/voxyserver bandwidth [bytes/s] ").withStyle(ChatFormatting.YELLOW))
@@ -602,7 +607,7 @@ public final class VoxyServerCommands {
 
     private static int statsOnce(CommandSourceStack source, Voxyserver mod) {
         if (mod.getStreamingService() == null) {
-            source.sendFailure(Component.literal("engine not started"));
+            source.sendFailure(Component.literal(Voxyserver.getConfig()!=null && !Voxyserver.getConfig().enabled ? "VoxyServer disabled (enabled=false); use /voxyserver enabled true to start" : "engine not started"));
             return 0;
         }
         MutableComponent stats = buildStats(source.getServer(), mod);
@@ -617,7 +622,7 @@ public final class VoxyServerCommands {
             return 0;
         }
         if (mod.getStreamingService() == null) {
-            source.sendFailure(Component.literal("engine not started"));
+            source.sendFailure(Component.literal(Voxyserver.getConfig()!=null && !Voxyserver.getConfig().enabled ? "VoxyServer disabled (enabled=false); use /voxyserver enabled true to start" : "engine not started"));
             return 0;
         }
         mod.addStatsSubscriber(player.getUUID());

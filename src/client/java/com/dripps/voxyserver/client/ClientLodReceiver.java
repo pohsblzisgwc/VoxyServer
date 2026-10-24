@@ -63,7 +63,7 @@ public final class ClientLodReceiver {
             clearQueuedInbound(false);
             ClientLodSettings.prepareForCurrentConnection();
             if (ClientPlayNetworking.canSend(LODHandshakePayload.TYPE)) {
-                ClientPlayNetworking.send(new LODHandshakePayload(VoxyServerNetworking.PROTOCOL_VERSION));
+                ClientLodSettings.sendHandshake();
             }
         });
 
@@ -82,11 +82,11 @@ public final class ClientLodReceiver {
                     int serverProtocol = payload.protocol();
                     int clientProtocol = VoxyServerNetworking.PROTOCOL_VERSION;
                 if (serverProtocol == clientProtocol) {
-                    ClientLodSettings.setProtocolOk(true);
+                    ClientLodSettings.applyProtocol(serverProtocol);
                 } else {
-                    ClientLodSettings.setProtocolOk(false);
+                    ClientLodSettings.applyProtocol(serverProtocol);
                     disableRemoteIngest();
-                        if (serverProtocol < clientProtocol) tellPlayer(serverOutOfDateMessage());
+                        if (serverProtocol > 0 && serverProtocol < clientProtocol) tellPlayer(serverOutOfDateMessage());
                     }
                 }));
 

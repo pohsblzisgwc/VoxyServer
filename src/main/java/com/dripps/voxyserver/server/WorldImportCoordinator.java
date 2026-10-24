@@ -25,6 +25,7 @@ public class WorldImportCoordinator {
     private final Object lock = new Object();
     private final ArrayDeque<ImportRequest> queue = new ArrayDeque<>();
 
+    private volatile boolean stopped;
     private volatile ActiveImport activeImport;
     private volatile long activeRunId;
     private volatile long nextRunId = 1L;
@@ -163,6 +164,7 @@ public class WorldImportCoordinator {
     }
 
     public void shutdown() {
+        stopped=true;
         ActiveImport active;
         synchronized (this.lock) {
             this.queue.clear();
@@ -245,6 +247,7 @@ public class WorldImportCoordinator {
                     String regions = active.importer.summary();
 
                     request.server.execute(() -> {
+                        if(stopped)return;
                         String msg = "importing "
                                 + active.dimensionId
                                 + " "
@@ -261,6 +264,7 @@ public class WorldImportCoordinator {
     }
 
     private void onImportFinished(long runId, ActiveImport active, ImportRequest request, boolean completed, int totalChunks) {
+        if(stopped)return;
         boolean cancelled = active != null && active.cancelled;
 
         synchronized (this.lock) {
