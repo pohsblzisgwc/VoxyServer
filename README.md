@@ -55,6 +55,21 @@ Fabric / Minecraft **26.3** · Java **25** · Voxy **0.2.20-beta**
 
 客户端个人设置位于 `config/voxyserver-client.json`，支持按服务器地址保存启用状态、远景半径和每 tick 数量偏好。有效范围取 Voxy 实际视距、个人设置和服务端上限。Voxy 的 `section_render_distance` 使用 512 方块顶层单位：16 对应 512 个 Minecraft 区块，32 对应 1024 个区块。
 
+### 只在一端安装会怎样
+
+VoxyServer 的 LOD 同步需要客户端和服务端都安装兼容版本，且协议版本一致。
+
+- **只有客户端安装**：不会影响未安装本模组的 Minecraft 服务端。客户端先检查服务端是否声明支持握手载荷；没有服务端通道时，不发送握手、偏好或 LOD 请求，因此不会启动远端同步，也不会收到服务端 LOD。客户端仍会加载本模组并注册少量本地事件回调；Voxy 对本地世界的正常功能不变。
+- **只有服务端安装**：服务端只向声明支持对应网络通道的客户端发送 VoxyServer 协议数据。未安装客户端模组时不会进行 VoxyServer LOD 同步，普通 Minecraft 游戏连接照常进行。
+- **两端都安装**：必须使用相同 VoxyServer 协议版本；本版本为协议 6。版本不兼容时不会开始 LOD 同步。
+
+### 关闭 VoxyServer 或关闭 Minecraft 服务端
+
+- `/voxyserver enabled false`：只关闭 VoxyServer 运行实例，停止本模组的同步、导入、维护和相关工作线程；**不会关闭 Minecraft 服务端进程**。需要恢复时执行 `/voxyserver enabled true`。也可用 `/voxyserver enabled` 查询当前状态。
+- `/stop`：停止整个 Minecraft 服务端并保存世界；这不是单独关闭 VoxyServer 的命令。
+
+所有 `/voxyserver` 命令需要管理员权限（原版 `COMMANDS_ADMIN`，通常为 OP 3 级）或控制台权限。
+
 集成端／单人／局域网房间的服务端运行支持没有加入本版本。
 
 ## 服务端命令
