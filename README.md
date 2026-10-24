@@ -178,6 +178,137 @@ Minecraft generates dependency halos for a target; the configured radii/rate cou
 
 The scheduler regression simulates 1,200 ticks with concurrent jobs and a high-MSPT interval, verifies strict start spacing, immediate ticket release, finite timeouts, retained concurrency debt and recovery, and covers late I/O/native completions, hot reload, candidate bounds and coordinate arithmetic. Native pre-launch checks validate the registered ticket flags. Actual chunk generation under a running server and its sustained MSPT/storage effects have **not** been load-tested here.
 
+### 中文命令速查
+
+以下命令适用于 **v1.2.6 / 协议 5**。游戏内需要管理员权限；在服务器控制台执行时，去掉开头的 `/`。下列命令调整的是服务端行为，客户端与服务端仍需使用兼容的协议版本。
+
+#### 查看、修改、保存与重载
+
+| 命令 | 作用 |
+|------|------|
+| `/voxyserver config list` | 列出全部配置、当前值，以及是否需要重启 |
+| `/voxyserver config get backgroundGenerationEnabled` | 查询某一项；把末尾选项名替换为下表任意选项即可 |
+| `/voxyserver config set <选项名> <值>` | 修改配置，校验通过后立即保存到 `config/voxyserver.json`；可热更新的选项同时生效，不必再执行 reload |
+| `/voxyserver reload` | 立即读取并校验手动修改的配置文件；与 `/voxyserver config reload` 等价 |
+| `/voxyserver stats` | 查看一次同步及旁路生成状态 |
+| `/voxyserver stats continuous` | 持续接收状态信息（游戏内玩家专用） |
+| `/voxyserver stats stop` | 停止持续接收状态信息（游戏内玩家专用） |
+| `/voxyserver help` | 查看命令帮助 |
+
+配置文件也会被定期检查。无效热重载保留当前有效配置，无效命令不会保存；不会因为填错数值而静默采用它。所有旁路选项均支持热更新。**修改旁路选项会撤销当前旁路任务并重新检查恢复条件；仅修改旁路选项不会重置所有玩家的 LOD 同步会话。**
+
+时间单位不要混用：`Ticks` 在 20 TPS 时是每秒 20 tick，卡顿或修改 tick rate 后换算会变化；`Seconds` / `Millis` 是秒 / 毫秒。半径使用 Minecraft 区块，**1 区块 = 16 方块**。生成速率使用实际时间，在服务器加速 tick 时也不会积累补发额度。
+
+#### 旁路生成：每个选项对应的命令
+
+表内命令使用默认值，复制后可替换末尾的值。功能默认关闭，确认参数后再开启。
+
+| 用途 | 修改命令 | 默认值、范围与行为 |
+|------|----------|------------------|
+| 启用或关闭 | `/voxyserver config set backgroundGenerationEnabled true` | 默认 `false`；`true` 开启，`false` 立即撤销自有票据并停止新增任务 |
+| 最近生成距离 | `/voxyserver config set backgroundGenerationMinRadiusChunks 16` | 默认 16；范围 0–1023。实际下限还会提高到有效原版视距 + 2 区块 |
+| 最远生成距离 | `/voxyserver config set backgroundGenerationMaxRadiusChunks 64` | 默认 64；范围 1–1024，必须大于配置的最小半径 |
+| 全服生成速率 | `/voxyserver config set backgroundGenerationChunksPerMinute 6` | 默认 6；范围 1–600。全服共享，每次启动均匀间隔；不是每个玩家各 6 个，也不是原版全部依赖邻块的数量 |
+| 总并发上限 | `/voxyserver config set backgroundGenerationMaxConcurrent 1` | 默认 1；范围 1–4。包含探测、等待、生成、保留加载及取消后尚未收尾的任务 |
+| 候选检查间隔 | `/voxyserver config set backgroundGenerationCheckIntervalTicks 100` | 默认 100 tick，20 TPS 时约 5 秒；范围 1–12000。超载取消与完成检查仍然每 tick 执行 |
+| 每轮候选尝试数 | `/voxyserver config set backgroundGenerationCandidatesPerPass 4` | 默认 4；范围 1–64。限制每轮抽样次数，不会遍历整个远景范围 |
+| 调度软预算 | `/voxyserver config set backgroundGenerationMaxProbeMillis 1` | 默认 1 ms；范围 1–5。限制候选/启动调度的软预算，不是原版区块生成的 CPU 时间上限 |
+| 允许启动的 MSPT | `/voxyserver config set backgroundGenerationStartMspt 25.0` | 默认 25；必须为有限正数且 ≤100。观测 MSPT ≤此值才累计恢复时间、允许新增生成 |
+| 立即停止的 MSPT | `/voxyserver config set backgroundGenerationStopMspt 35.0` | 默认 35；必须大于启动阈值且 ≤200。观测 MSPT >此值立即撤票；介于两个阈值之间时不启动新生成，已有任务可完成 |
+| 启动/恢复等待 | `/voxyserver config set backgroundGenerationResumeDelayTicks 600` | 默认 600 tick，20 TPS 时约 30 秒；范围 0–72000。需连续满足低负载条件，首次启动也要等待 |
+| 单任务超时 | `/voxyserver config set backgroundGenerationTimeoutSeconds 20` | 默认 20 秒；范围 1–30。从探测到目标完成的实际时间，不含完成后的保留加载阶段 |
+| 完成后保留加载 | `/voxyserver config set backgroundGenerationKeepLoadedTicks 60` | 默认 60 tick，20 TPS 时约 3 秒；范围 0–1200。给异步 LOD 捕获留时间，0 表示完成后立即释放自有票据 |
+| LOD 积压门槛 | `/voxyserver config set backgroundGenerationMaxPendingLodSections 256` | 默认 256；范围 0–65536。源区块段待办数大于此值时暂停旁路，0 表示关闭这项额外保护；计数单位不是 Minecraft 区块数 |
+| 最近目标缓存容量 | `/voxyserver config set backgroundGenerationHistorySize 4096` | 默认 4096；范围 1–65536。限制记录多少个最近探测坐标 |
+| 最近目标重查间隔 | `/voxyserver config set backgroundGenerationRecheckSeconds 600` | 默认 600 秒；范围 1–86400。避免频繁重查同一坐标，过小会增加 I/O |
+| 允许的维度 | `/voxyserver config set backgroundGenerationDimensions ["minecraft:overworld"]` | 默认仅主世界；必须是含 1–64 个、不重复的命名空间维度 ID 的 JSON 数组。目标附近必须有该维度内的合适玩家 |
+| 是否参考旁观玩家 | `/voxyserver config set backgroundGenerationIncludeSpectators false` | 默认 `false`；设为 `true` 后也会围绕旁观者选择候选 |
+
+例如，同时允许主世界和下界：
+
+```text
+/voxyserver config set backgroundGenerationDimensions ["minecraft:overworld","minecraft:the_nether"]
+```
+
+旁路只检查当前选中的点：已完整保存的区块跳过，已存在的已知部分生成区块可补完，未知或损坏状态不当作新空区块覆盖。生成后进入现有异步 LOD 维护队列，不会因此向客户端全量推送 L0 数据。
+
+#### 一套可直接使用的低速配置
+
+先关闭、再修改，最后开启，避免每次调参都撤销一批正在进行的任务：
+
+```text
+/voxyserver config set backgroundGenerationEnabled false
+/voxyserver config set backgroundGenerationMaxRadiusChunks 64
+/voxyserver config set backgroundGenerationMinRadiusChunks 16
+/voxyserver config set backgroundGenerationChunksPerMinute 6
+/voxyserver config set backgroundGenerationMaxConcurrent 1
+/voxyserver config set backgroundGenerationStartMspt 25.0
+/voxyserver config set backgroundGenerationStopMspt 35.0
+/voxyserver config set backgroundGenerationResumeDelayTicks 600
+/voxyserver config set backgroundGenerationEnabled true
+/voxyserver stats
+```
+
+这组数值从默认配置出发可直接执行。如果已有自定义数值，需要注意逐条校验：**扩大范围先调大最大半径，再调最小半径；缩小范围先降低最小半径，再降低最大半径。提高两项 MSPT 阈值时先调高停止阈值，降低时先调低启动阈值。** 也可以停用旁路后一次编辑配置文件，再执行 `/voxyserver reload`；半径和 MSPT 的大小关系仍必须有效。上面示例中的 `backgroundGenerationMaxRadiusChunks` 是旁路生成半径，与下面的客户端 LOD 发送半径是两个独立限制。
+
+立即停用只需：
+
+```text
+/voxyserver config set backgroundGenerationEnabled false
+```
+
+撤票只撤销本模组的加载需求，不会强杀原版共享生成线程，也不会强制卸载玩家正在使用的区块。已经交给原版的任务可能继续收尾，并继续占并发额度，防止恢复后叠加负载。原版还可能生成目标依赖的邻块，所以每分钟目标数不等于实际生成的所有区块数。
+
+#### 同步带宽与维护 CPU：相关命令
+
+这些选项不是旁路生成速度。较大的客户端 LOD 半径不会自动触发全范围预生成；旁路最大半径也不会扩大客户端需求或绕过服务器的发送校验。
+
+| 用途 | 修改命令 | 默认值与限制 |
+|------|----------|------------|
+| 客户端远景发送上限 | `/voxyserver radius 1024` | 默认 1024 区块；范围 1–4096。等价修改 `maxClientVoxyRadius`，同时同步旧别名 `lodStreamRadius`；实际还受客户端原生 Voxy 视距和个人设置约束 |
+| 每玩家带宽 | `/voxyserver bandwidth 250000` | 默认 250000 字节/秒/玩家；0 表示不限速，全服总带宽不是这个值 |
+| 开启语义去重 | `/voxyserver hashsync true` | 默认 `true`，等价修改 `hashSyncEnabled`；设为 `false` 会放弃复用匹配内容，可能显著增加传输 |
+| 每玩家每 tick 发送上限 | `/voxyserver config set maxSectionsPerTickPerPlayer 100` | 默认 100，至少 1；客户端个人限制仍有效 |
+| 每包节点数 | `/voxyserver config set sectionsPerPacket 16` | 默认 16，至少 1；实际协议每包最多 16 个节点，更大配置也不会绕过它 |
+| 全服维护线程时间预算 | `/voxyserver config set maintenanceMillisPerSecond 20` | 默认 20 ms/秒；范围 1–250。包括源转换、摘要处理、哈希与编码，是软预算，不包含原版旁路生成本身 |
+| 等待变化安静的时间 | `/voxyserver config set maintenanceQuietMillis 2000` | 默认 2000 ms；范围 100–30000。合并频繁变化；持续变化另有最长等待，不是每次方块变化就算哈希 |
+| 同一 L0 节点更新冷却 | `/voxyserver config set maintenanceCooldownMillis 10000` | 默认 10000 ms；范围 1000–180000 |
+| 哈希预算窗口 | `/voxyserver config set hashWorkIntervalTicks 20` | 默认 20；范围 1–1200，按标称 50 ms 单位计时；保留兼容字段 `hashRecheckIntervalTicks` 不得小于它 |
+| 每窗口新哈希数 | `/voxyserver config set maxHashComputationsPerInterval 64` | 默认 64；范围 1–4096，全服共享。缺失节点查询不占语义哈希次数 |
+| 每窗口哈希时间 | `/voxyserver config set maxHashMillisPerInterval 10` | 默认 10 ms；范围 1–1000，同时仍受总维护预算约束 |
+| 每玩家需求请求速率 | `/voxyserver config set maxDemandRequestsPerSecond 20` | 默认 20；范围 1–100，按每 20 服务端 tick 的窗口限制 |
+| Voxy 存储/服务线程数 | `/voxyserver threads 3` | 默认 3；范围 1–32，等价修改 `workerThreads`；不会把单个维护调度器改为多个线程 |
+| 诊断日志开关 | `/voxyserver config set debugTrackingEnabled true` | 默认 `false`；开启后输出维护和旁路统计，关闭使用 `false` |
+| 诊断日志间隔 | `/voxyserver config set debugTrackingInterval 200` | 默认 200 tick，20 TPS 时约 10 秒；至少 1 |
+| 普通区块加载时入队 LOD | `/voxyserver config set generateOnChunkLoad true` | 默认 `true`，需重启；旁路自身成功完成后仍会显式入队源数据 |
+| 普通区块卸载时入队 LOD | `/voxyserver config set generateOnChunkUnload true` | 默认 `true`，需重启 |
+| 日常方块/光照/生物群系变化跟踪 | `/voxyserver config set dirtyTrackingEnabled true` | 默认 `true`，需重启；关闭会影响日常 LOD 内容更新 |
+
+上表使用简写命令的选项也都可用统一格式，例如 `/voxyserver config set maxBandwidthBytesPerSec 250000`、`/voxyserver config set workerThreads 3`。`/voxyserver radius`、`/voxyserver bandwidth`、`/voxyserver threads`、`/voxyserver hashsync` 不带末尾值时表示查询。
+
+`tickInterval`、`dirtyTrackingInterval`、`enableDistancePacing`、`enableRegionHashSync`、`hashRecheckIntervalTicks`、`manifestRefreshIntervalTicks` 是保留兼容字段，仍可通过 `config get/set` 查看修改，但**不用于协议 5 的现行扫描/复核调度**。`/voxyserver pacing` 和 `/voxyserver regionhash` 修改的也是这些旧字段，不能把它们当作新两级摘要机制的开关。稳定分组的 150–210 秒随机复核目前是固定实现，没有对应的可调命令。
+
+#### “开了为什么还没开始”：状态解释
+
+执行 `/voxyserver stats` 看 `background` 一行：
+
+| 状态/字段 | 含义与排查方式 |
+|-----------|----------------|
+| `disabled` | 开关关闭，执行启用命令后仍需满足恢复条件 |
+| `cooldown` | 正累计连续低 MSPT 时间，首次启动也会进入这个阶段；默认需 600 tick |
+| `headroom` | MSPT 高于启动阈值；虽未必超过停止阈值，也不会新增生成 |
+| `mspt` | MSPT 超过停止阈值，或测量值异常，自有票据已撤销 |
+| `suspended` | 服务器暂停，或 LOD 源区块段积压超过配置门槛；可查看 `pending`，等待实际同步先处理完 |
+| `running` | 条件允许调度，不代表每 tick 都有生成；仍受全服速率、检查间隔、范围、已有区块与候选缓存约束 |
+| `stopped` | 服务已停止或遇到调度异常；先查看日志、处理原因，必要时重启 |
+| `MSPT` | 采用本次已测 tick 时间、原版平均值和平滑值中的最大值；不是只看一个很低的瞬时数字 |
+| `targets` | 成功完成的旁路目标数，不包含原版隐式生成的所有依赖邻块 |
+| `tickets` | 本模组仍持有的加载票据数 |
+| `draining` | 已取消但原版尚未完成的任务数；继续占并发额度，不会用新任务把它们顶掉 |
+| `failed` | 失败累计数；开启诊断日志可查看最近错误，以及探测、跳过、取消、超时等详细计数 |
+
+如果 `running` 但没有新目标，还要检查：白名单维度内是否有非旁观玩家、范围是否仍在世界边界内、该区域是否已经完整生成、最近候选是否仍在重查冷却内，以及 `draining` 是否占满额度。实际最小半径会提高到原版视距 + 2；例如有效原版视距 32 时，配置最小 16 实际仍从 34 起选点，若最大半径 ≤34 就没有可用的环形范围。该方案不承诺按半径填满整张地图，也不等同于管理员的全量导入命令。
+
 ### proof and delivery state
 
 Before: the server enumerated a full-resolution view grid and reconciled paged client inventories; moving or exhausted scans could create substantial repeated work. The retained v4 transaction/pacing regression fixtures protect those earlier correctness fixes, but the production protocol no longer starts those scans or inventory transactions.
