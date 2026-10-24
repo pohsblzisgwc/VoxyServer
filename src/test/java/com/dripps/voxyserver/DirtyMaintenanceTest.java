@@ -67,6 +67,15 @@ public final class DirtyMaintenanceTest {
         require(ready != null, "ready dirty root starved behind quiet roots");
         for (int i = 0; i < 100; i++)
             require(active.poll(100 * SECOND) == null, "exhausted queue produced work");
+        var slow = new DirtyRegionQueue<String>(2 * SECOND, 30 * SECOND, 10 * SECOND);
+        slow.updateTiming(120 * SECOND, 0);
+        slow.mark("a", 0, 0, 0, 0);
+        require(
+                slow.poll(30 * SECOND) == null && slow.poll(120 * SECOND) != null,
+                "expanded quiet time silently capped");
+        slow.updateTiming(0, 0);
+        slow.mark("a", 0, 0, 0, 121 * SECOND);
+        require(slow.poll(121 * SECOND) != null, "zero quiet/cooldown ignored");
         concurrentMarking();
         System.out.printf(
                 "PASS DirtyMaintenanceTest: 100000 edits -> 1 source, %.2f ms marking;"

@@ -14,8 +14,19 @@ public final class BackgroundGenerationTest {
         final Map<Integer, CompletableFuture<Boolean>> probes = new HashMap<>(),
                 generations = new HashMap<>();
         final Set<Integer> invalid = new HashSet<>(), owned = new HashSet<>();
-        int releases, ingested, samples, maxTickets;
+        int releases, ingested, samples, maxTickets, retained, overloadAfter = Integer.MAX_VALUE;
         boolean failGeneration;
+
+        @Override
+        public void retain(Integer target) {
+            require(owned.contains(target), "refresh foreign ticket");
+            retained++;
+        }
+
+        @Override
+        public boolean overloaded() {
+            return samples >= overloadAfter;
+        }
 
         @Override
         public Integer candidate() {
@@ -82,6 +93,7 @@ public final class BackgroundGenerationTest {
         sampling();
         duplicates();
         pressure();
+        enlargedBatchAndRetention();
         System.out.println(
                 "PASS BackgroundGenerationTest: MSPT hysteresis/instant cancellation, global"
                     + " no-burst rate, async debt, movement, timeout, reload, ticket release and"
@@ -133,10 +145,12 @@ public final class BackgroundGenerationTest {
         b.generations.get(1).complete(true);
         s.tick(2, 2, 20, false);
         require(
-                b.ingested == 1 && b.releases == 1 && s.stats().inFlight() == 0,
+                b.ingested == 1 && b.releases == 1 && s.stats().inFlight() == 1,
                 "completed target not ingested/released");
         s.tick(3, 9 * SECOND, 20, false);
-        require(b.probes.size() == 1, "generation allowance accumulated a burst");
+        require(
+                b.probes.size() == 2 && s.stats().started() == 1,
+                "staging bypassed generation rate");
         s.tick(4, 10 * SECOND + 1, 20, false);
         require(b.probes.size() == 2, "rate window never reopened");
         b.probes.get(2).complete(true);
@@ -323,6 +337,71 @@ public final class BackgroundGenerationTest {
                 "Background load: 1200 ticks, starts=%d completed=%d cancelled=%d peak pending=%d;"
                         + " no native worldgen/TPS claim%n",
                 s.stats().started(), s.stats().completed(), s.stats().cancelled(), maxPending);
+    }
+
+    private static void enlargedBatchAndRetention() {
+        var c = config();
+        c.backgroundGenerationChunksPerMinute = 600000;
+        c.backgroundGenerationMaxConcurrent = 500;
+        c.backgroundGenerationCandidatesPerPass = 500;
+        var b = new Backend();
+        for (int i = 0; i < 6000; i++) b.candidates.add(i);
+        var s = new BackgroundGenerationController<>(b, c, () -> 0L);
+        for (int tick = 0; tick < 11; tick++) {
+            b.probes.values().forEach(f -> f.complete(false));
+            b.generations.values().forEach(f -> f.complete(true));
+            s.tick(tick, tick * 50_000_000L, 20, false);
+            require(s.stats().started() <= tick * 500L, "per-tick token batch exceeded");
+            require(s.stats().inFlight() <= 500, "expanded concurrency exceeded");
+        }
+        require(s.stats().started() >= 2500, "scheduler still limited to one start per tick");
+        s.shutdown();
+        require(b.owned.isEmpty(), "batch shutdown leaked tickets");
+        System.out.printf(
+                "Expanded generation load: starts=%d, peak tickets=%d; simulated backend only%n",
+                s.stats().started(), b.maxTickets);
+        var dynamic = new Backend();
+        for (int i = 0; i < 500; i++) dynamic.candidates.add(i);
+        dynamic.overloadAfter = 3;
+        var hot = new BackgroundGenerationController<>(dynamic, c, () -> 0L);
+        hot.tick(0, 0, 20, false);
+        require(
+                dynamic.samples == 3
+                        && hot.stats().state().equals("mspt")
+                        && hot.stats().draining() == 3,
+                "mid-pass overload ignored");
+        hot.shutdown();
+        var longJob = new Backend();
+        longJob.candidates.add(1);
+        c.backgroundGenerationTimeoutSeconds = 180;
+        c.backgroundGenerationMaxConcurrent = 1;
+        var held = new BackgroundGenerationController<>(longJob, c, () -> 0L);
+        held.tick(0, 0, 20, false);
+        longJob.probes.get(1).complete(false);
+        held.tick(1, 1, 20, false);
+        held.tick(600, 30 * SECOND, 20, false);
+        require(longJob.retained == 0, "ticket refresh too early");
+        held.tick(601, 30 * SECOND + 1, 20, false);
+        held.tick(1201, 60 * SECOND + 1, 20, false);
+        require(
+                longJob.retained == 2 && held.stats().tickets() == 1,
+                "long-running ticket expired without refresh");
+        held.shutdown();
+        require(longJob.releases == 1, "refreshed ticket not released once");
+        require(
+                BackgroundGenerationArea.contains(
+                        new BackgroundGenerationArea.Point(2048, 0), 0, 0, 16, 4096),
+                "old radius cap remains");
+        require(
+                !BackgroundGenerationArea.isWorldChunk(
+                        new BackgroundGenerationArea.Point(Integer.MAX_VALUE, 0)),
+                "world shift overflow admitted");
+        for (int i = 0; i < 10000; i++) {
+            var p = BackgroundGenerationArea.sample(0, 0, 0, Integer.MAX_VALUE, new Random(i));
+            require(
+                    p == null || BackgroundGenerationArea.isWorldChunk(p),
+                    "extreme radius escaped world");
+        }
     }
 
     private static void require(boolean condition, String message) {

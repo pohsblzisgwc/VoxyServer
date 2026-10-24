@@ -26,6 +26,12 @@ public final class BackgroundGenerationController<T> {
         void ingest(T target);
 
         void release(T target);
+
+        default void retain(T target) {}
+
+        default boolean overloaded() {
+            return false;
+        }
     }
 
     private enum Phase {
@@ -42,7 +48,7 @@ public final class BackgroundGenerationController<T> {
         CompletableFuture<Boolean> future;
         Phase phase = Phase.PROBE;
         boolean ticket, cancelled;
-        long releaseTick;
+        long releaseTick, lastRetain;
 
         Job(T target, Object key, long began) {
             this.target = target;
@@ -67,17 +73,27 @@ public final class BackgroundGenerationController<T> {
             String lastFailure) {}
 
     private final Backend<T> backend;
-    private final List<Job> jobs = new ArrayList<>();
+    private final Map<Object, Job> jobs = new LinkedHashMap<>();
+    private final GenerationRateBudget rateBudget = new GenerationRateBudget();
+    private final java.util.function.LongSupplier workClock;
     private VoxyServerConfig config;
-    private long lowSince = -1, lastTick, nextProbeTick, lastStartNanos;
-    private boolean hasStarted, closed;
+    private long lowSince = -1, lastTick, nextProbeTick;
+    private boolean closed;
     private String lastFailure = "";
     private String state = "disabled";
     private double mspt;
     private long probes, skippedExisting, started, completed, failed, cancelled, timedOut;
 
     public BackgroundGenerationController(Backend<T> backend, VoxyServerConfig config) {
+        this(backend, config, System::nanoTime);
+    }
+
+    public BackgroundGenerationController(
+            Backend<T> backend,
+            VoxyServerConfig config,
+            java.util.function.LongSupplier workClock) {
         this.backend = backend;
+        this.workClock = workClock;
         config.requireValid();
         this.config = config.copy();
     }
@@ -112,9 +128,10 @@ public final class BackgroundGenerationController<T> {
         boolean headroom =
                 lowSince >= 0 && tick - lowSince >= config.backgroundGenerationResumeDelayTicks;
         state = headroom ? "running" : lowSince < 0 ? "headroom" : "cooldown";
-        long began = System.nanoTime(),
+        long began = workClock.getAsLong(),
                 limit = config.backgroundGenerationMaxProbeMillis * 1_000_000L;
-        for (var it = jobs.iterator(); it.hasNext(); ) {
+        for (var it = jobs.values().iterator(); it.hasNext(); ) {
+            if (stopIfOverloaded()) return;
             Job job = it.next();
             if (job.cancelled) {
                 if (job.future == null || job.future.isDone()) it.remove();
@@ -124,6 +141,16 @@ public final class BackgroundGenerationController<T> {
                 cancel(job);
                 if (job.future == null || job.future.isDone()) it.remove();
                 continue;
+            }
+            if (job.ticket && tick - job.lastRetain >= 600) {
+                try {
+                    backend.retain(job.target);
+                    job.lastRetain = tick;
+                } catch (RuntimeException error) {
+                    recordFailure(error);
+                    cancel(job);
+                    continue;
+                }
             }
             if (job.phase == Phase.HOLD) {
                 if (tick >= job.releaseTick) {
@@ -150,12 +177,11 @@ public final class BackgroundGenerationController<T> {
                 }
                 if (job.phase == Phase.READY
                         && headroom
-                        && rateAvailable(now)
-                        && System.nanoTime() - began < limit) {
-                    // Charge actual generation starts, not merely NBT probes. No catch-up bursts
-                    // after idle.
-                    lastStartNanos = now;
-                    hasStarted = true;
+                        && workClock.getAsLong() - began < limit
+                        && rateBudget.tryAcquire(config.backgroundGenerationChunksPerMinute, now)) {
+                    // A high configured rate grants a bounded batch, rather than only one
+                    // start/tick.
+                    job.lastRetain = tick;
                     started++;
                     job.ticket = true;
                     job.phase = Phase.GENERATING;
@@ -186,7 +212,6 @@ public final class BackgroundGenerationController<T> {
             }
         }
         if (!headroom
-                || !rateAvailable(now)
                 || tick < nextProbeTick
                 || jobs.size() >= config.backgroundGenerationMaxConcurrent) return;
         nextProbeTick = tick + config.backgroundGenerationCheckIntervalTicks;
@@ -194,28 +219,31 @@ public final class BackgroundGenerationController<T> {
                 attempt < config.backgroundGenerationCandidatesPerPass
                         && jobs.size() < config.backgroundGenerationMaxConcurrent;
                 attempt++) {
-            if (System.nanoTime() - began >= limit) break;
+            if (stopIfOverloaded()) return;
+            if (workClock.getAsLong() - began >= limit) break;
             T target = backend.candidate();
             if (target == null || !backend.valid(target)) continue;
             Object key = backend.key(target);
-            if (jobs.stream().anyMatch(j -> j.key.equals(key))) continue;
+            if (jobs.containsKey(key)) continue;
             Job job = new Job(target, key, now);
-            jobs.add(job);
+            jobs.put(key, job);
             try {
                 probes++;
                 job.future = Objects.requireNonNull(backend.exists(target));
             } catch (RuntimeException error) {
                 recordFailure(error);
-                jobs.remove(job);
+                jobs.remove(job.key);
             }
         }
     }
 
-    private boolean rateAvailable(long now) {
-        long interval =
-                (60_000_000_000L + config.backgroundGenerationChunksPerMinute - 1)
-                        / config.backgroundGenerationChunksPerMinute;
-        return !hasStarted || now - lastStartNanos >= interval;
+    private boolean stopIfOverloaded() {
+        if (!backend.overloaded()) return false;
+        state = "mspt";
+        lowSince = -1;
+        cancelAll();
+        drainCancelled();
+        return true;
     }
 
     private void recordFailure(RuntimeException error) {
@@ -245,11 +273,11 @@ public final class BackgroundGenerationController<T> {
     }
 
     private void cancelAll() {
-        for (Job job : jobs) cancel(job);
+        for (Job job : jobs.values()) cancel(job);
     }
 
     private void drainCancelled() {
-        jobs.removeIf(job -> job.cancelled && (job.future == null || job.future.isDone()));
+        jobs.values().removeIf(job -> job.cancelled && (job.future == null || job.future.isDone()));
     }
 
     public void shutdown() {
@@ -261,7 +289,7 @@ public final class BackgroundGenerationController<T> {
 
     public Stats stats() {
         int tickets = 0, debt = 0;
-        for (Job job : jobs) {
+        for (Job job : jobs.values()) {
             if (job.ticket) tickets++;
             if (job.cancelled) debt++;
         }

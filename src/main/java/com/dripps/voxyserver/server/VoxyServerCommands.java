@@ -30,11 +30,16 @@ public final class VoxyServerCommands {
     private VoxyServerCommands() {
     }
 
+    /** Server-authoritative gate for the complete command tree, including help, reads and stats. */
+    public static boolean isAdministrator(CommandSourceStack source) {
+        return source.permissions().hasPermission(Permissions.COMMANDS_ADMIN);
+    }
+
     public static void register(CommandDispatcher<CommandSourceStack> dispatcher, Voxyserver mod) {
         Supplier<WorldImportCoordinator> coordinatorSupplier = mod::getImportCoordinator;
         dispatcher.register(
                 Commands.literal("voxyserver")
-                        .requires(source -> source.permissions().hasPermission(Permissions.COMMANDS_ADMIN))
+                        .requires(VoxyServerCommands::isAdministrator)
                         .executes(context -> showHelp(context.getSource()))
                         .then(Commands.literal("help")
                                 .executes(context -> showHelp(context.getSource())))
@@ -50,7 +55,7 @@ public final class VoxyServerCommands {
                                         .executes(context -> setBandwidth(context.getSource(), mod, IntegerArgumentType.getInteger(context, "bytesPerSec")))))
                         .then(Commands.literal("threads")
                                 .executes(context -> getThreads(context.getSource()))
-                                .then(Commands.argument("count", IntegerArgumentType.integer(1, 32))
+                                .then(Commands.argument("count", IntegerArgumentType.integer(1, VoxyServerConfig.MAX_NATIVE_WORKER_THREADS))
                                         .executes(context -> setThreads(context.getSource(), mod, IntegerArgumentType.getInteger(context, "count")))))
                         .then(Commands.literal("hashsync")
                                 .executes(context -> getHashSync(context.getSource()))
@@ -326,7 +331,7 @@ public final class VoxyServerCommands {
                 .append(Component.literal("- Get or set distance-based packet pacing").withStyle(ChatFormatting.GRAY));
         out.append(Component.literal("\n/voxyserver regionhash [true|false] ").withStyle(ChatFormatting.YELLOW))
                 .append(Component.literal("- Get or set 512x512 region hash synchronization").withStyle(ChatFormatting.GRAY));
-        out.append(Component.literal("\n/voxyserver threads [1-32] ").withStyle(ChatFormatting.YELLOW))
+        out.append(Component.literal("\n/voxyserver threads [1-10000] ").withStyle(ChatFormatting.YELLOW))
                 .append(Component.literal("- Get or set LOD meshing worker thread count").withStyle(ChatFormatting.GRAY));
         out.append(Component.literal("\n/voxyserver reload ").withStyle(ChatFormatting.YELLOW))
                 .append(Component.literal("- Reload voxyserver.json from disk & apply live").withStyle(ChatFormatting.GRAY));

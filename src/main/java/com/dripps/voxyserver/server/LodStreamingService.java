@@ -213,10 +213,11 @@ public final class LodStreamingService {
                 state.rateWindow = window;
                 state.rateUsed = 0;
             }
-            if (++state.rateUsed > config.maxDemandRequestsPerSecond) {
+            if (state.rateUsed >= config.maxDemandRequestsPerSecond) {
                 requestsRejected++;
                 return;
             }
+            state.rateUsed++;
         }
         int radius = state.tracker.getEffectiveRadius(config.maxClientVoxyRadius);
         if (p.phase() != LODDemandPayload.CANCEL)
@@ -593,7 +594,8 @@ public final class LodStreamingService {
         try {
             long now = System.nanoTime();
             int idleTurns = 0;
-            while (heavyBudget.tryAcquire(
+            // Yield between maintenance turns even when the administrator grants >=1 s/s.
+            while (now-cycleStarted<50_000_000L && heavyBudget.tryAcquire(
                     now / 50_000_000L,
                     20,
                     Integer.MAX_VALUE,

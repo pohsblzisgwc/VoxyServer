@@ -16,6 +16,10 @@ public class VoxyServerConfig {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final String FILE_NAME = "voxyserver.json";
 
+    public static final int MAX_BACKGROUND_CHUNKS_PER_MINUTE = 600_000;
+    // Upstream UnifiedServiceThreadPool.shutdown releases 10,000 worker permits.
+    public static final int MAX_NATIVE_WORKER_THREADS = 10_000;
+
     public int maxClientVoxyRadius = 1024;
     public int lodStreamRadius = 1024;
     public int maxSectionsPerTickPerPlayer = 100;
@@ -68,127 +72,84 @@ public class VoxyServerConfig {
 
     public List<String> validate() {
         List<String> errors = new ArrayList<>();
-        if (maxClientVoxyRadius < 1 || maxClientVoxyRadius > 4096) {
+        // These view bounds are part of the existing protocol, not workload policy limits.
+        if (maxClientVoxyRadius < 1 || maxClientVoxyRadius > 4096)
             errors.add(
-                    "maxClientVoxyRadius must be between 1 and 4096, got " + maxClientVoxyRadius);
-        }
+                    "maxClientVoxyRadius must be 1..4096 (protocol bound), got "
+                            + maxClientVoxyRadius);
         if (lodStreamRadius < 1 || lodStreamRadius > 4096)
-            errors.add("lodStreamRadius must be 1..4096, got " + lodStreamRadius);
-        if (maxSectionsPerTickPerPlayer < 1)
+            errors.add("lodStreamRadius must be 1..4096 (protocol bound), got " + lodStreamRadius);
+        positive(errors, "maxSectionsPerTickPerPlayer", maxSectionsPerTickPerPlayer);
+        positive(errors, "sectionsPerPacket", sectionsPerPacket);
+        positive(errors, "tickInterval", tickInterval);
+        if (workerThreads < 1 || workerThreads > MAX_NATIVE_WORKER_THREADS)
             errors.add(
-                    "maxsectionspertickperplayer must be at least 1, got "
-                            + maxSectionsPerTickPerPlayer);
-        if (sectionsPerPacket < 1)
-            errors.add("sectionsperpacket must be at least 1, got " + sectionsPerPacket);
-        if (tickInterval < 1) errors.add("tickinterval must be at least 1, got " + tickInterval);
-        if (workerThreads < 1 || workerThreads > 32)
-            errors.add("workerthreads must be between 1 and 32, got " + workerThreads);
-        if (dirtyTrackingInterval < 1)
-            errors.add("dirtytrackinginterval must be at least 1, got " + dirtyTrackingInterval);
-        if (debugTrackingInterval < 1)
-            errors.add("debugtrackinginterval must be at least 1, got " + debugTrackingInterval);
-        if (maxBandwidthBytesPerSec < 0)
-            errors.add(
-                    "maxbandwidthbytespersec cannot be negative, got " + maxBandwidthBytesPerSec);
-        if (hashWorkIntervalTicks < 1 || hashWorkIntervalTicks > 1200)
-            errors.add("hashWorkIntervalTicks must be 1..1200, got " + hashWorkIntervalTicks);
-        if (maxHashComputationsPerInterval < 1 || maxHashComputationsPerInterval > 4096)
-            errors.add(
-                    "maxHashComputationsPerInterval must be 1..4096, got "
-                            + maxHashComputationsPerInterval);
-        if (maxHashMillisPerInterval < 1 || maxHashMillisPerInterval > 1000)
-            errors.add("maxHashMillisPerInterval must be 1..1000, got " + maxHashMillisPerInterval);
-        if (hashRecheckIntervalTicks < hashWorkIntervalTicks)
-            errors.add(
-                    "hashRecheckIntervalTicks must be >= hashWorkIntervalTicks, got "
-                            + hashRecheckIntervalTicks);
-        if (manifestRefreshIntervalTicks < 100)
-            errors.add(
-                    "manifestRefreshIntervalTicks must be >= 100, got "
-                            + manifestRefreshIntervalTicks);
-        if (maintenanceMillisPerSecond < 1 || maintenanceMillisPerSecond > 250)
-            errors.add("maintenanceMillisPerSecond must be 1..250");
-        if (maintenanceQuietMillis < 100 || maintenanceQuietMillis > 30_000)
-            errors.add("maintenanceQuietMillis must be 100..30000");
-        if (maintenanceCooldownMillis < 1000 || maintenanceCooldownMillis > 180_000)
-            errors.add("maintenanceCooldownMillis must be 1000..180000");
-        if (maxDemandRequestsPerSecond < 1 || maxDemandRequestsPerSecond > 100)
-            errors.add("maxDemandRequestsPerSecond must be 1..100");
-        if (backgroundGenerationMinRadiusChunks < 0 || backgroundGenerationMinRadiusChunks > 1023)
-            errors.add(
-                    "backgroundGenerationMinRadiusChunks must be 0..1023, got "
-                            + backgroundGenerationMinRadiusChunks);
+                    "workerThreads must be 1.."
+                            + MAX_NATIVE_WORKER_THREADS
+                            + " (native pool shutdown bound), got "
+                            + workerThreads);
+        positive(errors, "dirtyTrackingInterval", dirtyTrackingInterval);
+        positive(errors, "debugTrackingInterval", debugTrackingInterval);
+        nonnegative(errors, "maxBandwidthBytesPerSec", maxBandwidthBytesPerSec);
+        positive(errors, "hashWorkIntervalTicks", hashWorkIntervalTicks);
+        positive(errors, "maxHashComputationsPerInterval", maxHashComputationsPerInterval);
+        positive(errors, "maxHashMillisPerInterval", maxHashMillisPerInterval);
+        positive(errors, "hashRecheckIntervalTicks", hashRecheckIntervalTicks);
+        positive(errors, "manifestRefreshIntervalTicks", manifestRefreshIntervalTicks);
+        positive(errors, "maintenanceMillisPerSecond", maintenanceMillisPerSecond);
+        nonnegative(errors, "maintenanceQuietMillis", maintenanceQuietMillis);
+        nonnegative(errors, "maintenanceCooldownMillis", maintenanceCooldownMillis);
+        positive(errors, "maxDemandRequestsPerSecond", maxDemandRequestsPerSecond);
+        nonnegative(
+                errors, "backgroundGenerationMinRadiusChunks", backgroundGenerationMinRadiusChunks);
         if (backgroundGenerationMaxRadiusChunks < 1
-                || backgroundGenerationMaxRadiusChunks > 1024
                 || backgroundGenerationMaxRadiusChunks <= backgroundGenerationMinRadiusChunks)
             errors.add(
-                    "backgroundGenerationMaxRadiusChunks must be 1..1024 and greater than the"
+                    "backgroundGenerationMaxRadiusChunks must be positive and greater than the"
                         + " minimum radius, got "
                             + backgroundGenerationMaxRadiusChunks);
-        if (backgroundGenerationChunksPerMinute < 1 || backgroundGenerationChunksPerMinute > 600)
+        if (backgroundGenerationChunksPerMinute < 1
+                || backgroundGenerationChunksPerMinute > MAX_BACKGROUND_CHUNKS_PER_MINUTE)
             errors.add(
-                    "backgroundGenerationChunksPerMinute must be 1..600, got "
+                    "backgroundGenerationChunksPerMinute must be 1.."
+                            + MAX_BACKGROUND_CHUNKS_PER_MINUTE
+                            + ", got "
                             + backgroundGenerationChunksPerMinute);
-        if (backgroundGenerationMaxConcurrent < 1 || backgroundGenerationMaxConcurrent > 4)
+        positive(errors, "backgroundGenerationMaxConcurrent", backgroundGenerationMaxConcurrent);
+        positive(
+                errors,
+                "backgroundGenerationCheckIntervalTicks",
+                backgroundGenerationCheckIntervalTicks);
+        positive(
+                errors,
+                "backgroundGenerationCandidatesPerPass",
+                backgroundGenerationCandidatesPerPass);
+        positive(errors, "backgroundGenerationMaxProbeMillis", backgroundGenerationMaxProbeMillis);
+        if (!Double.isFinite(backgroundGenerationStartMspt) || backgroundGenerationStartMspt <= 0)
             errors.add(
-                    "backgroundGenerationMaxConcurrent must be 1..4, got "
-                            + backgroundGenerationMaxConcurrent);
-        if (backgroundGenerationCheckIntervalTicks < 1
-                || backgroundGenerationCheckIntervalTicks > 12000)
-            errors.add(
-                    "backgroundGenerationCheckIntervalTicks must be 1..12000, got "
-                            + backgroundGenerationCheckIntervalTicks);
-        if (backgroundGenerationCandidatesPerPass < 1 || backgroundGenerationCandidatesPerPass > 64)
-            errors.add(
-                    "backgroundGenerationCandidatesPerPass must be 1..64, got "
-                            + backgroundGenerationCandidatesPerPass);
-        if (backgroundGenerationMaxProbeMillis < 1 || backgroundGenerationMaxProbeMillis > 5)
-            errors.add(
-                    "backgroundGenerationMaxProbeMillis must be 1..5, got "
-                            + backgroundGenerationMaxProbeMillis);
-        if (!Double.isFinite(backgroundGenerationStartMspt)
-                || backgroundGenerationStartMspt <= 0
-                || backgroundGenerationStartMspt > 100)
-            errors.add(
-                    "backgroundGenerationStartMspt must be finite and >0..100, got "
+                    "backgroundGenerationStartMspt must be finite and positive, got "
                             + backgroundGenerationStartMspt);
         if (!Double.isFinite(backgroundGenerationStopMspt)
-                || backgroundGenerationStopMspt <= backgroundGenerationStartMspt
-                || backgroundGenerationStopMspt > 200)
+                || backgroundGenerationStopMspt <= backgroundGenerationStartMspt)
             errors.add(
-                    "backgroundGenerationStopMspt must be finite, greater than start MSPT and"
-                        + " <=200, got "
+                    "backgroundGenerationStopMspt must be finite and greater than start MSPT, got "
                             + backgroundGenerationStopMspt);
-        if (backgroundGenerationResumeDelayTicks < 0
-                || backgroundGenerationResumeDelayTicks > 72000)
-            errors.add(
-                    "backgroundGenerationResumeDelayTicks must be 0..72000, got "
-                            + backgroundGenerationResumeDelayTicks);
-        if (backgroundGenerationTimeoutSeconds < 1 || backgroundGenerationTimeoutSeconds > 30)
-            errors.add(
-                    "backgroundGenerationTimeoutSeconds must be 1..30, got "
-                            + backgroundGenerationTimeoutSeconds);
-        if (backgroundGenerationKeepLoadedTicks < 0 || backgroundGenerationKeepLoadedTicks > 1200)
-            errors.add(
-                    "backgroundGenerationKeepLoadedTicks must be 0..1200, got "
-                            + backgroundGenerationKeepLoadedTicks);
-        if (backgroundGenerationMaxPendingLodSections < 0
-                || backgroundGenerationMaxPendingLodSections > 65536)
-            errors.add(
-                    "backgroundGenerationMaxPendingLodSections must be 0..65536, got "
-                            + backgroundGenerationMaxPendingLodSections);
-        if (backgroundGenerationHistorySize < 1 || backgroundGenerationHistorySize > 65536)
-            errors.add(
-                    "backgroundGenerationHistorySize must be 1..65536, got "
-                            + backgroundGenerationHistorySize);
-        if (backgroundGenerationRecheckSeconds < 1 || backgroundGenerationRecheckSeconds > 86400)
-            errors.add(
-                    "backgroundGenerationRecheckSeconds must be 1..86400, got "
-                            + backgroundGenerationRecheckSeconds);
-        if (backgroundGenerationDimensions == null
-                || backgroundGenerationDimensions.isEmpty()
-                || backgroundGenerationDimensions.size() > 64)
-            errors.add("backgroundGenerationDimensions must contain 1..64 dimension identifiers");
+        nonnegative(
+                errors,
+                "backgroundGenerationResumeDelayTicks",
+                backgroundGenerationResumeDelayTicks);
+        positive(errors, "backgroundGenerationTimeoutSeconds", backgroundGenerationTimeoutSeconds);
+        nonnegative(
+                errors, "backgroundGenerationKeepLoadedTicks", backgroundGenerationKeepLoadedTicks);
+        nonnegative(
+                errors,
+                "backgroundGenerationMaxPendingLodSections",
+                backgroundGenerationMaxPendingLodSections);
+        nonnegative(errors, "backgroundGenerationHistorySize", backgroundGenerationHistorySize);
+        nonnegative(
+                errors, "backgroundGenerationRecheckSeconds", backgroundGenerationRecheckSeconds);
+        if (backgroundGenerationDimensions == null || backgroundGenerationDimensions.isEmpty())
+            errors.add("backgroundGenerationDimensions must not be empty");
         else {
             var seen = new java.util.HashSet<String>();
             for (String dimension : backgroundGenerationDimensions)
@@ -203,6 +164,14 @@ public class VoxyServerConfig {
                     errors.add("backgroundGenerationDimensions contains a duplicate: " + dimension);
         }
         return errors;
+    }
+
+    private static void positive(List<String> errors, String field, int value) {
+        if (value < 1) errors.add(field + " must be 1..2147483647, got " + value);
+    }
+
+    private static void nonnegative(List<String> errors, String field, int value) {
+        if (value < 0) errors.add(field + " must be 0..2147483647, got " + value);
     }
 
     /** Shared by startup, reload and command application; never normalize an invalid value away. */

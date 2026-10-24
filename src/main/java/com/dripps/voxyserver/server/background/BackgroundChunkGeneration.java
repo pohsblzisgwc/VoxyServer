@@ -58,7 +58,7 @@ public final class BackgroundChunkGeneration {
         this.server = server;
         this.streaming = streaming;
         config = cfg.copy();
-        history = new BoundedLruCache<>(cfg.backgroundGenerationHistorySize);
+        history = new BoundedLruCache<>(Math.max(1, cfg.backgroundGenerationHistorySize));
         controller = new BackgroundGenerationController<>(new NativeBackend(), cfg);
     }
 
@@ -100,7 +100,7 @@ public final class BackgroundChunkGeneration {
                     && (stats.state().equals("mspt") || lastState.equals("mspt")))
                 Voxyserver.LOGGER.info(
                         "background generation state={} MSPT={} stopAbove={} inFlight={}"
-                            + " draining={}",
+                                + " draining={}",
                         stats.state(),
                         stats.mspt(),
                         config.backgroundGenerationStopMspt,
@@ -115,7 +115,7 @@ public final class BackgroundChunkGeneration {
     public void updateConfig(VoxyServerConfig next) {
         controller.updateConfig(next);
         if (config.backgroundGenerationHistorySize != next.backgroundGenerationHistorySize)
-            history = new BoundedLruCache<>(next.backgroundGenerationHistorySize);
+            history = new BoundedLruCache<>(Math.max(1, next.backgroundGenerationHistorySize));
         config = next.copy();
     }
 
@@ -153,6 +153,9 @@ public final class BackgroundChunkGeneration {
                 player.getBlockZ() >> 4,
                 minimumRadius(player),
                 config.backgroundGenerationMaxRadiusChunks)) return false;
+        if (!BackgroundGenerationArea.isWorldChunk(
+                new BackgroundGenerationArea.Point(target.position.x(), target.position.z())))
+            return false;
         int x = target.position.x() << 4, z = target.position.z() << 4;
         return target.level.getWorldBorder().isWithinBounds(new BlockPos(x, 0, z))
                 && target.level.getWorldBorder().isWithinBounds(new BlockPos(x + 15, 0, z + 15));
@@ -175,7 +178,10 @@ public final class BackgroundChunkGeneration {
             if (!inRange(target)
                     || target.level.getChunkSource().getChunkNow(point.x(), point.z()) != null)
                 return null;
-            Long previous = history.get(BackgroundChunkGeneration.this.key(target));
+            Long previous =
+                    config.backgroundGenerationHistorySize == 0
+                            ? null
+                            : history.get(BackgroundChunkGeneration.this.key(target));
             return previous != null
                             && System.nanoTime() - previous
                                     < TimeUnit.SECONDS.toNanos(
@@ -196,7 +202,8 @@ public final class BackgroundChunkGeneration {
 
         @Override
         public CompletableFuture<Boolean> exists(Target target) {
-            history.put(BackgroundChunkGeneration.this.key(target), System.nanoTime());
+            if (config.backgroundGenerationHistorySize > 0)
+                history.put(BackgroundChunkGeneration.this.key(target), System.nanoTime());
             // Vanilla pending-save I/O: inspect only this chunk, without loading a chunk or
             // decoding palettes on main.
             return target.level
@@ -229,6 +236,17 @@ public final class BackgroundChunkGeneration {
                     .addTicketAndLoadWithRadius(ticketType, target.position, 0)
                     .thenApply(
                             result -> result instanceof ChunkResult<?> chunk && chunk.isSuccess());
+        }
+
+        @Override
+        public void retain(Target target) {
+            if (ownedTickets.contains(BackgroundChunkGeneration.this.key(target)))
+                target.level.getChunkSource().addTicketWithRadius(ticketType, target.position, 0);
+        }
+
+        @Override
+        public boolean overloaded() {
+            return mspt(System.nanoTime()) > config.backgroundGenerationStopMspt;
         }
 
         @Override

@@ -35,11 +35,40 @@ public final class NativeLodIntegrationTest {
         SharedConstants.tryDetectVersion();
         Bootstrap.bootStrap();
         com.dripps.voxyserver.server.background.BackgroundChunkGeneration.registerTicketType();
-        var backgroundTicket=com.dripps.voxyserver.server.background.BackgroundChunkGeneration.ticketType();
-        require(backgroundTicket.doesLoad()&&!backgroundTicket.doesSimulate()&&!backgroundTicket.persist()
-                &&!backgroundTicket.canExpireIfUnloaded()&&backgroundTicket.timeout()>0,
-                "background generation ticket can persist, tick entities, or expire before loading");
-        require(!backgroundTicket.equals(TicketType.PLAYER_LOADING),"background ticket aliases player loading");
+        var backgroundTicket =
+                com.dripps.voxyserver.server.background.BackgroundChunkGeneration.ticketType();
+        require(
+                backgroundTicket.doesLoad()
+                        && !backgroundTicket.doesSimulate()
+                        && !backgroundTicket.persist()
+                        && !backgroundTicket.canExpireIfUnloaded()
+                        && backgroundTicket.timeout() > 0,
+                "background generation ticket can persist, tick entities, or expire before"
+                    + " loading");
+        require(
+                !backgroundTicket.equals(TicketType.PLAYER_LOADING),
+                "background ticket aliases player loading");
+        var ticketStore = new net.minecraft.world.level.TicketStorage();
+        var position = new net.minecraft.world.level.ChunkPos(1, 2);
+        ticketStore.addTicketWithRadius(backgroundTicket, position, 0);
+        ticketStore.addTicketWithRadius(TicketType.PLAYER_LOADING, position, 0);
+        var owned =
+                ticketStore.getTickets(position.pack()).stream()
+                        .filter(t -> t.getType() == backgroundTicket)
+                        .findFirst()
+                        .orElseThrow();
+        for (int i = 0; i < backgroundTicket.timeout() + 1; i++) owned.decreaseTicksLeft();
+        require(owned.isTimedOut(), "native ticket expiry test not reached");
+        ticketStore.addTicketWithRadius(backgroundTicket, position, 0);
+        require(
+                !owned.isTimedOut() && ticketStore.getTickets(position.pack()).size() == 2,
+                "native refresh duplicated or failed to renew ticket");
+        ticketStore.removeTicketWithRadius(backgroundTicket, position, 0);
+        require(
+                ticketStore.getTickets(position.pack()).size() == 1
+                        && ticketStore.getTickets(position.pack()).getFirst().getType()
+                                == TicketType.PLAYER_LOADING,
+                "release removed player ticket");
         // Loading, rather than reading bytecode signatures, checks every required server mixin's
         // targets.
         for (String name :

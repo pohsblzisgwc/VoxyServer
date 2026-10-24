@@ -28,19 +28,21 @@ public final class DirtyRegionQueue<D> {
     private final com.dripps.voxyserver.util.BoundedLruCache<Work<D>, Long> cooldowns =
             new com.dripps.voxyserver.util.BoundedLruCache<>(65_536);
     private volatile long quietNanos, cooldownNanos;
-    private final long maxWaitNanos;
+    private final long baseMaxWaitNanos;
+    private volatile long maxWaitNanos;
 
     public DirtyRegionQueue(long quietNanos, long maxWaitNanos, long cooldownNanos) {
-        if (quietNanos < 0 || maxWaitNanos < quietNanos || cooldownNanos < 0)
+        if (quietNanos < 0 || maxWaitNanos < 0 || cooldownNanos < 0)
             throw new IllegalArgumentException("invalid dirty timing");
         this.quietNanos = quietNanos;
-        this.maxWaitNanos = maxWaitNanos;
+        this.baseMaxWaitNanos = maxWaitNanos;
+        this.maxWaitNanos = Math.max(maxWaitNanos, quietNanos);
         this.cooldownNanos = cooldownNanos;
     }
 
     public void updateTiming(long quiet, long cooldown) {
-        if (quiet < 0 || quiet > maxWaitNanos || cooldown < 0)
-            throw new IllegalArgumentException("invalid dirty timing");
+        if (quiet < 0 || cooldown < 0) throw new IllegalArgumentException("invalid dirty timing");
+        maxWaitNanos = Math.max(baseMaxWaitNanos, quiet);
         quietNanos = quiet;
         cooldownNanos = cooldown;
     }
@@ -169,7 +171,7 @@ public final class DirtyRegionQueue<D> {
     }
 
     public List<SavedRoot<D>> snapshotIncluding(Work<D> active) {
-        var copy = new DirtyRegionQueue<D>(quietNanos, maxWaitNanos, cooldownNanos);
+        var copy = new DirtyRegionQueue<D>(quietNanos, baseMaxWaitNanos, cooldownNanos);
         for (var saved : snapshot()) copy.restore(saved.dimension, saved.key, saved.bits, 0);
         if (active != null) copy.retry(active, 0);
         return copy.snapshot();

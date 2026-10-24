@@ -33,7 +33,10 @@ public final class ConfigValidationTest {
             boundary(path, "backgroundGenerationMinRadiusChunks", new int[] {-1, 0, 16, 64, 1024});
             boundary(
                     path, "backgroundGenerationMaxRadiusChunks", new int[] {0, 16, 17, 1024, 1025});
-            boundary(path, "backgroundGenerationChunksPerMinute", new int[] {0, 1, 600, 601});
+            boundary(
+                    path,
+                    "backgroundGenerationChunksPerMinute",
+                    new int[] {-1, 0, 1, 600, 601, 600000, 600001, Integer.MAX_VALUE});
             boundary(path, "backgroundGenerationMaxConcurrent", new int[] {0, 1, 4, 5});
             boundary(
                     path, "backgroundGenerationCheckIntervalTicks", new int[] {0, 1, 12000, 12001});
@@ -85,6 +88,7 @@ public final class ConfigValidationTest {
                 require(!candidate.validate().isEmpty(), "invalid dimension allowlist accepted");
             }
             commandTypes();
+            expandedLimits();
             Files.writeString(path, "null");
             require(
                     VoxyServerConfig.load(path).validate().isEmpty()
@@ -99,12 +103,50 @@ public final class ConfigValidationTest {
             require(VoxyServerConfig.reload(path) == null, "reload accepted malformed JSON");
             System.out.println(
                     "PASS ConfigValidationTest: startup/reload/command/save boundaries and"
-                        + " invalid-file preservation");
+                            + " invalid-file preservation");
         } finally {
             try (var paths = Files.walk(directory)) {
                 for (Path p : paths.sorted(Comparator.reverseOrder()).toList()) Files.delete(p);
             }
         }
+    }
+
+    private static void expandedLimits() throws Exception {
+        var c = new VoxyServerConfig();
+        require(c.backgroundGenerationChunksPerMinute == 6, "default rate changed");
+        for (var field : c.getClass().getFields()) {
+            if (java.lang.reflect.Modifier.isStatic(field.getModifiers())
+                    || field.getType() != int.class) continue;
+            String name = field.getName();
+            if (java.util.Set.of(
+                            "maxClientVoxyRadius",
+                            "lodStreamRadius",
+                            "workerThreads",
+                            "backgroundGenerationChunksPerMinute",
+                            "backgroundGenerationMinRadiusChunks")
+                    .contains(name)) continue;
+            var wide = new VoxyServerConfig();
+            field.setInt(wide, Integer.MAX_VALUE);
+            wide.requireValid();
+        }
+        c.backgroundGenerationChunksPerMinute = 600000;
+        c.backgroundGenerationMinRadiusChunks = Integer.MAX_VALUE - 1;
+        c.backgroundGenerationMaxRadiusChunks = Integer.MAX_VALUE;
+        c.backgroundGenerationStartMspt = 1000;
+        c.backgroundGenerationStopMspt = 2000;
+        c.workerThreads = 10000;
+        c.requireValid();
+        c.workerThreads = 10001;
+        require(!c.validate().isEmpty(), "native shutdown bound removed");
+        c.workerThreads = 3;
+        c.backgroundGenerationChunksPerMinute = 600001;
+        require(!c.validate().isEmpty(), "600000 cap exceeded");
+        c = new VoxyServerConfig();
+        c.backgroundGenerationHistorySize = 0;
+        c.backgroundGenerationRecheckSeconds = 0;
+        c.maintenanceQuietMillis = 0;
+        c.maintenanceCooldownMillis = 0;
+        c.requireValid();
     }
 
     private static void commandTypes() {

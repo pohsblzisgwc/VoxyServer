@@ -6,7 +6,7 @@ a fabric server side mod that voxelizes chunks into LODs using [voxy](https://gi
 
 ## how it works
 
-Release **v1.2.6** uses **protocol 5** on Fabric / Minecraft 26.3. Both sides must update together. Published `v1.2.5` (`4deea7a`) is unchanged.
+Release **v1.2.7** uses **protocol 5** on Fabric / Minecraft 26.3. Both sides must update together. Published `v1.2.5` (`4deea7a`) is unchanged.
 
 The client derives demand from Voxy's actual render subscriptions at native LOD levels **0–4**. Each node contains 32³ voxels and spans `32 << level` blocks. Voxy's `sectionRenderDistance` uses **512-block top-level units**: values 16 and 32 mean 512 and 1024 Minecraft chunks. The remote range is capped by the native view, personal preference and server maximum. The server validates the requested coordinates, dimension, epoch and rate without enumerating the view grid or the database.
 
@@ -101,7 +101,7 @@ config file is generated at `config/voxyserver.json` on first run.
 | `maxBandwidthBytesPerSec` | `250000` | per-player token bucket, `0` = unlimited |
 | `hashSyncEnabled` | `true` | reuse semantic matches; disabling it still preserves absence and protocol limits |
 | `maintenanceMillisPerSecond` | `20` | global worker wall-time allowance per second, including proofs, source conversion, hashing and packet encoding |
-| `maintenanceQuietMillis` | `2000` | coalesce changes until a source root is quiet; continuous changes also release after at most 30 seconds, plus queue delay |
+| `maintenanceQuietMillis` | `2000` | coalesce changes until a source root is quiet; continuous changes release after max(30 seconds, configured quiet time), plus queue delay |
 | `maintenanceCooldownMillis` | `10000` | minimum repeat-update interval for a 32³ L0 node |
 | `maxDemandRequestsPerSecond` | `20` | accepted requests per player per nominal server second |
 | `hashWorkIntervalTicks` | `20` | shared hash allowance window, in nominal 50 ms units |
@@ -117,6 +117,8 @@ config file is generated at `config/voxyserver.json` on first run.
 Old `tickInterval`, `dirtyTrackingInterval`, `enableDistancePacing`, `enableRegionHashSync`, `hashRecheckIntervalTicks` and `manifestRefreshIntervalTicks` fields remain accepted and validated for configuration compatibility. Protocol 5 uses client render demand, native LOD selection and the maintenance settings above instead of those scanner/inventory schedules.
 
 Configuration is validated before application or saving. Invalid startup files produce field-specific diagnostics and use validated defaults without overwriting the file. Invalid reloads retain the current validated configuration; commands and saves use the same validation guard. Changing chunk lifecycle generation flags or enabling/disabling dirty tracking still requires a restart.
+
+In v1.2.7 all defaults stay unchanged. Workload/timing integer settings now accept positive 32-bit values (up to 2,147,483,647); bandwidth, quiet/cooldown times and background delay/hold/backlog/history/recheck accept zero as documented. Generation starts accept 1..600000 per minute. The view protocol still limits radius to 4096, packets to 16 nodes, and queues retain their byte/packet caps. Voxy service threads accept 1..10000 because the native pool's shutdown releases 10000 permits. These technical bounds remain enforced.
 
 ### maintenance and memory
 
@@ -140,22 +142,24 @@ Before generation, targeted vanilla pending-save I/O checks the candidate. Alrea
 |---------|---------|---------|
 | `backgroundGenerationEnabled` | `false` | enable the optional path; all settings here apply live |
 | `backgroundGenerationMinRadiusChunks` | `16` | inner target radius in Minecraft chunks, raised to at least effective vanilla view + 2 |
-| `backgroundGenerationMaxRadiusChunks` | `64` | outer target radius, greater than minimum, at most 1024 |
-| `backgroundGenerationChunksPerMinute` | `6` | global generation-start cap, evenly spaced with no accumulated catch-up burst; 1..600 |
-| `backgroundGenerationMaxConcurrent` | `1` | total pending/ready/generating/held/draining jobs, 1..4 across all players |
+| `backgroundGenerationMaxRadiusChunks` | `64` | outer target radius, greater than minimum; positive 32-bit integer, with world-border validation |
+| `backgroundGenerationChunksPerMinute` | `6` | global generation-start rate, 1..600000; default remains 6; high rates use bounded tick batches |
+| `backgroundGenerationMaxConcurrent` | `1` | total pending/ready/generating/held/draining jobs, any positive 32-bit integer across all players |
 | `backgroundGenerationCheckIntervalTicks` | `100` | ticks between candidate passes; native cancellations and completions are still checked each tick |
-| `backgroundGenerationCandidatesPerPass` | `4` | maximum constant-size candidate attempts per pass, 1..64 |
-| `backgroundGenerationMaxProbeMillis` | `1` | soft main-thread scheduler/probe allowance per pass, 1..5 ms; does not cap native generation time |
+| `backgroundGenerationCandidatesPerPass` | `4` | maximum constant-size candidate attempts per pass, any positive 32-bit integer |
+| `backgroundGenerationMaxProbeMillis` | `1` | soft main-thread scheduler/probe allowance per pass, positive 32-bit milliseconds; does not cap native generation time |
 | `backgroundGenerationStartMspt` | `25.0` | headroom required to admit generation; finite, positive |
 | `backgroundGenerationStopMspt` | `35.0` | cancel owned work immediately when observed MSPT exceeds this; must exceed start MSPT |
 | `backgroundGenerationResumeDelayTicks` | `600` | continuous below-start ticks required before initial admission or recovery; 600 = 30 seconds at 20 TPS |
-| `backgroundGenerationTimeoutSeconds` | `20` | wall-clock deadline from initial probe to completed target, 1..30 seconds |
-| `backgroundGenerationKeepLoadedTicks` | `60` | short hold for LOD capture after FULL completion, 0..1200 ticks; the LOD queue can also read saved chunks later |
+| `backgroundGenerationTimeoutSeconds` | `20` | wall-clock deadline from initial probe to completed target, positive 32-bit seconds |
+| `backgroundGenerationKeepLoadedTicks` | `60` | short hold for LOD capture after FULL completion, nonnegative 32-bit ticks; the LOD queue can also read saved chunks later |
 | `backgroundGenerationMaxPendingLodSections` | `256` | suspend and release work above this source backlog; 0 disables this additional gate |
-| `backgroundGenerationHistorySize` | `4096` | recent coordinate cache limit, 1..65536 |
+| `backgroundGenerationHistorySize` | `4096` | recent coordinate cache limit, nonnegative 32-bit integer; 0 disables history |
 | `backgroundGenerationRecheckSeconds` | `600` | minimum repeat-probe delay for a recently selected coordinate |
-| `backgroundGenerationDimensions` | `["minecraft:overworld"]` | explicit nonempty allowlist; namespaced identifiers, up to 64 |
+| `backgroundGenerationDimensions` | `["minecraft:overworld"]` | explicit nonempty allowlist; unique namespaced identifiers; no arbitrary count cap |
 | `backgroundGenerationIncludeSpectators` | `false` | allow spectator positions to seed candidates |
+
+The global rate uses wall-clock credit plus a minute quota. It retains at most `max(1, ceil(rate / 1200))` starts of credit: 6/minute keeps one start per ten seconds, while 600000/minute permits batches of at most 500 at 20 TPS. Idle time does not accumulate a large catch-up burst. Raising only the rate does not raise concurrency, candidate frequency/count, probe budget or available MSPT headroom; those independently limit throughput. This is a configurable admission ceiling, not a claim that native Minecraft can generate 600000 chunks/minute. Long-running or held tickets are renewed every 600 ticks and remain loading-only.
 
 Enable and tune through the validated configuration file, `/voxyserver reload`, or commands, for example:
 
@@ -176,11 +180,15 @@ The sampler observes the maximum of the current measured tick, vanilla average M
 
 Minecraft generates dependency halos for a target; the configured radii/rate count **requested target chunks**, not every neighbor generated by the native pipeline. Native generation and synchronous ticket-graph setup can exceed the scheduler's soft allowance; the generator is not a hard CPU/MSPT guarantee. After ticket setup, load is sampled again and excessive tick time immediately closes admission. Large modded generators require correspondingly conservative settings. `/voxyserver stats` reports scheduler state, MSPT, completed targets, tickets, draining jobs and failures. Debug reports additionally include probes/skips, starts/completions, failures/last error, cancellations/timeouts, live tickets and canceled-but-draining jobs.
 
-The scheduler regression simulates 1,200 ticks with concurrent jobs and a high-MSPT interval, verifies strict start spacing, immediate ticket release, finite timeouts, retained concurrency debt and recovery, and covers late I/O/native completions, hot reload, candidate bounds and coordinate arithmetic. Native pre-launch checks validate the registered ticket flags. Actual chunk generation under a running server and its sustained MSPT/storage effects have **not** been load-tested here.
+The scheduler regression simulates 1,200 ticks with concurrent jobs and a high-MSPT interval, verifies default-rate spacing and high-rate batches, immediate ticket release, finite timeouts, retained concurrency debt and recovery, and covers late I/O/native completions, hot reload, candidate bounds and coordinate arithmetic. A separate rate regression executes 600,000 admissions across 1,200 simulated ticks. Native pre-launch checks validate ticket flags, renewal and release isolation. Actual chunk generation under a running server and its sustained MSPT/storage effects have **not** been load-tested here.
 
 ### 中文命令速查
 
-以下命令适用于 **v1.2.6 / 协议 5**。游戏内需要管理员权限；在服务器控制台执行时，去掉开头的 `/`。下列命令调整的是服务端行为，客户端与服务端仍需使用兼容的协议版本。
+**v1.2.7 限额调整：默认仍为每分钟 6 个目标，允许范围扩大到 1–600000。** 并发、候选数、调度预算、半径和等待时间等策略上限已放宽；允许的最大整数为 2147483647。实际吞吐仍同时受并发、候选检查间隔、候选数、调度预算和 MSPT 限制。只提高每分钟额度不会自动提高其他设置。服务端不保证真实生成能达到配置上限。
+
+所有 `/voxyserver` 命令（含 help、查询、stats、导入与修改）统一由服务端检查 `COMMANDS_ADMIN` 权限，对应原版权限等级 3 或更高。客户端提交命令不能绕过检查；普通玩家的远景需求协议仍可正常使用。
+
+以下命令适用于 **v1.2.7 / 协议 5**。游戏内需要管理员权限；在服务器控制台执行时，去掉开头的 `/`。下列命令调整的是服务端行为，客户端与服务端仍需使用兼容的协议版本。
 
 #### 查看、修改、保存与重载
 
@@ -206,22 +214,22 @@ The scheduler regression simulates 1,200 ticks with concurrent jobs and a high-M
 | 用途 | 修改命令 | 默认值、范围与行为 |
 |------|----------|------------------|
 | 启用或关闭 | `/voxyserver config set backgroundGenerationEnabled true` | 默认 `false`；`true` 开启，`false` 立即撤销自有票据并停止新增任务 |
-| 最近生成距离 | `/voxyserver config set backgroundGenerationMinRadiusChunks 16` | 默认 16；范围 0–1023。实际下限还会提高到有效原版视距 + 2 区块 |
-| 最远生成距离 | `/voxyserver config set backgroundGenerationMaxRadiusChunks 64` | 默认 64；范围 1–1024，必须大于配置的最小半径 |
-| 全服生成速率 | `/voxyserver config set backgroundGenerationChunksPerMinute 6` | 默认 6；范围 1–600。全服共享，每次启动均匀间隔；不是每个玩家各 6 个，也不是原版全部依赖邻块的数量 |
-| 总并发上限 | `/voxyserver config set backgroundGenerationMaxConcurrent 1` | 默认 1；范围 1–4。包含探测、等待、生成、保留加载及取消后尚未收尾的任务 |
-| 候选检查间隔 | `/voxyserver config set backgroundGenerationCheckIntervalTicks 100` | 默认 100 tick，20 TPS 时约 5 秒；范围 1–12000。超载取消与完成检查仍然每 tick 执行 |
-| 每轮候选尝试数 | `/voxyserver config set backgroundGenerationCandidatesPerPass 4` | 默认 4；范围 1–64。限制每轮抽样次数，不会遍历整个远景范围 |
-| 调度软预算 | `/voxyserver config set backgroundGenerationMaxProbeMillis 1` | 默认 1 ms；范围 1–5。限制候选/启动调度的软预算，不是原版区块生成的 CPU 时间上限 |
-| 允许启动的 MSPT | `/voxyserver config set backgroundGenerationStartMspt 25.0` | 默认 25；必须为有限正数且 ≤100。观测 MSPT ≤此值才累计恢复时间、允许新增生成 |
-| 立即停止的 MSPT | `/voxyserver config set backgroundGenerationStopMspt 35.0` | 默认 35；必须大于启动阈值且 ≤200。观测 MSPT >此值立即撤票；介于两个阈值之间时不启动新生成，已有任务可完成 |
-| 启动/恢复等待 | `/voxyserver config set backgroundGenerationResumeDelayTicks 600` | 默认 600 tick，20 TPS 时约 30 秒；范围 0–72000。需连续满足低负载条件，首次启动也要等待 |
-| 单任务超时 | `/voxyserver config set backgroundGenerationTimeoutSeconds 20` | 默认 20 秒；范围 1–30。从探测到目标完成的实际时间，不含完成后的保留加载阶段 |
-| 完成后保留加载 | `/voxyserver config set backgroundGenerationKeepLoadedTicks 60` | 默认 60 tick，20 TPS 时约 3 秒；范围 0–1200。给异步 LOD 捕获留时间，0 表示完成后立即释放自有票据 |
-| LOD 积压门槛 | `/voxyserver config set backgroundGenerationMaxPendingLodSections 256` | 默认 256；范围 0–65536。源区块段待办数大于此值时暂停旁路，0 表示关闭这项额外保护；计数单位不是 Minecraft 区块数 |
-| 最近目标缓存容量 | `/voxyserver config set backgroundGenerationHistorySize 4096` | 默认 4096；范围 1–65536。限制记录多少个最近探测坐标 |
-| 最近目标重查间隔 | `/voxyserver config set backgroundGenerationRecheckSeconds 600` | 默认 600 秒；范围 1–86400。避免频繁重查同一坐标，过小会增加 I/O |
-| 允许的维度 | `/voxyserver config set backgroundGenerationDimensions ["minecraft:overworld"]` | 默认仅主世界；必须是含 1–64 个、不重复的命名空间维度 ID 的 JSON 数组。目标附近必须有该维度内的合适玩家 |
+| 最近生成距离 | `/voxyserver config set backgroundGenerationMinRadiusChunks 16` | 默认 16；范围 0–2147483646，且小于最大半径。实际下限还会提高到有效原版视距 + 2 区块 |
+| 最远生成距离 | `/voxyserver config set backgroundGenerationMaxRadiusChunks 64` | 默认 64；范围 1–2147483647，必须大于配置的最小半径；候选仍须在世界边界内 |
+| 全服生成速率 | `/voxyserver config set backgroundGenerationChunksPerMinute 6` | 默认 6；范围 1–600000。全服共享，低速均匀间隔，高速按 tick 批量启动；不是每个玩家各 6 个，也不是原版全部依赖邻块的数量 |
+| 总并发上限 | `/voxyserver config set backgroundGenerationMaxConcurrent 1` | 默认 1；范围 1–2147483647。包含探测、等待、生成、保留加载及取消后尚未收尾的任务 |
+| 候选检查间隔 | `/voxyserver config set backgroundGenerationCheckIntervalTicks 100` | 默认 100 tick，20 TPS 时约 5 秒；范围 1–2147483647。超载取消与完成检查仍然每 tick 执行 |
+| 每轮候选尝试数 | `/voxyserver config set backgroundGenerationCandidatesPerPass 4` | 默认 4；范围 1–2147483647。限制每轮抽样次数，不会遍历整个远景范围 |
+| 调度软预算 | `/voxyserver config set backgroundGenerationMaxProbeMillis 1` | 默认 1 ms；范围 1–2147483647。限制候选/启动调度的软预算，不是原版区块生成的 CPU 时间上限 |
+| 允许启动的 MSPT | `/voxyserver config set backgroundGenerationStartMspt 25.0` | 默认 25；必须为有限正数。观测 MSPT ≤此值才累计恢复时间、允许新增生成 |
+| 立即停止的 MSPT | `/voxyserver config set backgroundGenerationStopMspt 35.0` | 默认 35；必须为有限数且大于启动阈值。观测 MSPT >此值立即撤票；介于两个阈值之间时不启动新生成，已有任务可完成 |
+| 启动/恢复等待 | `/voxyserver config set backgroundGenerationResumeDelayTicks 600` | 默认 600 tick，20 TPS 时约 30 秒；范围 0–2147483647。需连续满足低负载条件，首次启动也要等待 |
+| 单任务超时 | `/voxyserver config set backgroundGenerationTimeoutSeconds 20` | 默认 20 秒；范围 1–2147483647。从探测到目标完成的实际时间，不含完成后的保留加载阶段 |
+| 完成后保留加载 | `/voxyserver config set backgroundGenerationKeepLoadedTicks 60` | 默认 60 tick，20 TPS 时约 3 秒；范围 0–2147483647。给异步 LOD 捕获留时间，0 表示完成后立即释放自有票据 |
+| LOD 积压门槛 | `/voxyserver config set backgroundGenerationMaxPendingLodSections 256` | 默认 256；范围 0–2147483647。源区块段待办数大于此值时暂停旁路，0 表示关闭这项额外保护；计数单位不是 Minecraft 区块数 |
+| 最近目标缓存容量 | `/voxyserver config set backgroundGenerationHistorySize 4096` | 默认 4096；范围 0–2147483647。限制记录多少个最近探测坐标，0 关闭该缓存 |
+| 最近目标重查间隔 | `/voxyserver config set backgroundGenerationRecheckSeconds 600` | 默认 600 秒；范围 0–2147483647；0 允许立即重查。避免频繁重查同一坐标，过小会增加 I/O |
+| 允许的维度 | `/voxyserver config set backgroundGenerationDimensions ["minecraft:overworld"]` | 默认仅主世界；必须是非空、不重复的命名空间维度 ID 的 JSON 数组，无固定数量上限。目标附近必须有该维度内的合适玩家 |
 | 是否参考旁观玩家 | `/voxyserver config set backgroundGenerationIncludeSpectators false` | 默认 `false`；设为 `true` 后也会围绕旁观者选择候选 |
 
 例如，同时允许主世界和下界：
@@ -270,14 +278,14 @@ The scheduler regression simulates 1,200 ticks with concurrent jobs and a high-M
 | 开启语义去重 | `/voxyserver hashsync true` | 默认 `true`，等价修改 `hashSyncEnabled`；设为 `false` 会放弃复用匹配内容，可能显著增加传输 |
 | 每玩家每 tick 发送上限 | `/voxyserver config set maxSectionsPerTickPerPlayer 100` | 默认 100，至少 1；客户端个人限制仍有效 |
 | 每包节点数 | `/voxyserver config set sectionsPerPacket 16` | 默认 16，至少 1；实际协议每包最多 16 个节点，更大配置也不会绕过它 |
-| 全服维护线程时间预算 | `/voxyserver config set maintenanceMillisPerSecond 20` | 默认 20 ms/秒；范围 1–250。包括源转换、摘要处理、哈希与编码，是软预算，不包含原版旁路生成本身 |
-| 等待变化安静的时间 | `/voxyserver config set maintenanceQuietMillis 2000` | 默认 2000 ms；范围 100–30000。合并频繁变化；持续变化另有最长等待，不是每次方块变化就算哈希 |
-| 同一 L0 节点更新冷却 | `/voxyserver config set maintenanceCooldownMillis 10000` | 默认 10000 ms；范围 1000–180000 |
-| 哈希预算窗口 | `/voxyserver config set hashWorkIntervalTicks 20` | 默认 20；范围 1–1200，按标称 50 ms 单位计时；保留兼容字段 `hashRecheckIntervalTicks` 不得小于它 |
-| 每窗口新哈希数 | `/voxyserver config set maxHashComputationsPerInterval 64` | 默认 64；范围 1–4096，全服共享。缺失节点查询不占语义哈希次数 |
-| 每窗口哈希时间 | `/voxyserver config set maxHashMillisPerInterval 10` | 默认 10 ms；范围 1–1000，同时仍受总维护预算约束 |
-| 每玩家需求请求速率 | `/voxyserver config set maxDemandRequestsPerSecond 20` | 默认 20；范围 1–100，按每 20 服务端 tick 的窗口限制 |
-| Voxy 存储/服务线程数 | `/voxyserver threads 3` | 默认 3；范围 1–32，等价修改 `workerThreads`；不会把单个维护调度器改为多个线程 |
+| 全服维护线程时间预算 | `/voxyserver config set maintenanceMillisPerSecond 20` | 默认 20 ms/秒；范围 1–2147483647。包括源转换、摘要处理、哈希与编码，是软预算，不包含原版旁路生成本身 |
+| 等待变化安静的时间 | `/voxyserver config set maintenanceQuietMillis 2000` | 默认 2000 ms；范围 0–2147483647。合并频繁变化；持续变化另有最长等待，不是每次方块变化就算哈希 |
+| 同一 L0 节点更新冷却 | `/voxyserver config set maintenanceCooldownMillis 10000` | 默认 10000 ms；范围 0–2147483647 |
+| 哈希预算窗口 | `/voxyserver config set hashWorkIntervalTicks 20` | 默认 20；范围 1–2147483647，按标称 50 ms 单位计时；保留兼容字段 `hashRecheckIntervalTicks` 只需为正整数 |
+| 每窗口新哈希数 | `/voxyserver config set maxHashComputationsPerInterval 64` | 默认 64；范围 1–2147483647，全服共享。缺失节点查询不占语义哈希次数 |
+| 每窗口哈希时间 | `/voxyserver config set maxHashMillisPerInterval 10` | 默认 10 ms；范围 1–2147483647，同时仍受总维护预算约束 |
+| 每玩家需求请求速率 | `/voxyserver config set maxDemandRequestsPerSecond 20` | 默认 20；范围 1–2147483647，按每 20 服务端 tick 的窗口限制 |
+| Voxy 存储/服务线程数 | `/voxyserver threads 3` | 默认 3；范围 1–10000，等价修改 `workerThreads`；不会把单个维护调度器改为多个线程 |
 | 诊断日志开关 | `/voxyserver config set debugTrackingEnabled true` | 默认 `false`；开启后输出维护和旁路统计，关闭使用 `false` |
 | 诊断日志间隔 | `/voxyserver config set debugTrackingInterval 200` | 默认 200 tick，20 TPS 时约 10 秒；至少 1 |
 | 普通区块加载时入队 LOD | `/voxyserver config set generateOnChunkLoad true` | 默认 `true`，需重启；旁路自身成功完成后仍会显式入队源数据 |
