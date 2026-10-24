@@ -1,7 +1,6 @@
 package com.dripps.voxyserver.server;
 
 import com.dripps.voxyserver.config.VoxyServerConfig;
-import com.dripps.voxyserver.server.background.BackgroundChunkGeneration;
 import com.dripps.voxyserver.util.ServerStatsTracker;
 
 import net.minecraft.server.MinecraftServer;
@@ -13,23 +12,17 @@ public final class ServerRuntime implements AutoCloseable {
     private LodStreamingService streaming;
     private ChunkVoxelizer voxelizer;
     private WorldImportCoordinator imports;
-    private BackgroundChunkGeneration background;
     private DirtyTracker dirty;
     private ServerStatsTracker stats;
 
-    public ServerRuntime(
-            MinecraftServer server,
-            VoxyServerConfig config,
-            com.dripps.voxyserver.server.background.GenerationAdmissionState generationDebt) {
+    public ServerRuntime(MinecraftServer server, VoxyServerConfig config) {
         try {
             engine = new ServerLodEngine(server.getWorldPath(LevelResource.ROOT));
             engine.updateDedicatedThreadsCount(config.workerThreads);
             streaming = new LodStreamingService(engine, config);
             voxelizer = new ChunkVoxelizer(engine, streaming, config);
             imports = new WorldImportCoordinator(engine, streaming);
-            background = new BackgroundChunkGeneration(server, streaming, config, generationDebt);
-            if (config.dirtyTrackingEnabled)
-                dirty = new DirtyTracker(voxelizer, streaming, config.dirtyTrackingInterval);
+            if (config.dirtyTrackingEnabled) dirty = new DirtyTracker(streaming);
             stats = new ServerStatsTracker(config.debugTrackingInterval);
             DirtyTracker.INSTANCE = dirty;
             ServerStatsTracker.INSTANCE = stats;
@@ -56,18 +49,12 @@ public final class ServerRuntime implements AutoCloseable {
         return imports;
     }
 
-    public BackgroundChunkGeneration background() {
-        return background;
-    }
-
     public ServerStatsTracker stats() {
         return stats;
     }
 
     public void updateConfig(VoxyServerConfig previous, VoxyServerConfig next) {
         if (!next.sameStreamingSettings(previous)) streaming.updateConfig(next);
-        background.updateConfig(next);
-        if (dirty != null) dirty.updateFlushInterval(next.dirtyTrackingInterval);
         if (previous.workerThreads != next.workerThreads)
             engine.updateDedicatedThreadsCount(next.workerThreads);
         stats.updateTickInterval(next.debugTrackingInterval);
@@ -81,9 +68,6 @@ public final class ServerRuntime implements AutoCloseable {
         // Run every release even if one component fails. Do not shut storage before its producers.
         for (Runnable stop :
                 new Runnable[] {
-                    () -> {
-                        if (background != null) background.shutdown();
-                    },
                     () -> {
                         if (imports != null) imports.shutdown();
                     },
@@ -104,7 +88,6 @@ public final class ServerRuntime implements AutoCloseable {
                 else failure.addSuppressed(error);
             }
         }
-        background = null;
         imports = null;
         streaming = null;
         voxelizer = null;

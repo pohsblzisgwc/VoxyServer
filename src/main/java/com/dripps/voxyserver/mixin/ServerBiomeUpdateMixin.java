@@ -20,7 +20,8 @@ public abstract class ServerBiomeUpdateMixin {
         var tracker = DirtyTracker.INSTANCE;
         if (tracker == null) return;
         for (var chunk : chunks)
-            for (int y = chunk.getMinSectionY(); y < chunk.getMaxSectionY(); y++)
-                tracker.markDirty(level, chunk.getPos().x(), y << 4, chunk.getPos().z());
+            for (int y = chunk.getMinSectionY();
+                    y < chunk.getMinSectionY() + chunk.getSections().length;
+                    y++) tracker.markDirty(level, chunk.getPos().x(), y << 4, chunk.getPos().z());
     }
 }

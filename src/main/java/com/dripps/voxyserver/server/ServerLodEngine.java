@@ -26,6 +26,11 @@ public class ServerLodEngine extends VoxyInstance {
 
     private final Path basePath;
     private final java.util.UUID worldIdentity;
+    private final com.dripps.voxyserver.sync.version.VersionIndex versions;
+
+    public com.dripps.voxyserver.sync.version.VersionIndex versions() {
+        return versions;
+    }
 
     public java.util.UUID getWorldIdentity() {
         return worldIdentity;
@@ -48,6 +53,13 @@ public class ServerLodEngine extends VoxyInstance {
                                 this.basePath.resolve("world-id"));
             } catch (java.io.IOException failure) {
                 throw new IllegalStateException("Cannot establish LOD cache identity", failure);
+            }
+            try {
+                this.versions =
+                        new com.dripps.voxyserver.sync.version.VersionIndex(
+                                basePath.resolve("lod0-versions-v6.bin"));
+            } catch (java.io.IOException failure) {
+                throw new IllegalStateException("Cannot open LOD version index", failure);
             }
             this.storageConfig = StorageConfigUtil.createDefaultSerializer();
             this.updateDedicatedThreads();
@@ -98,6 +110,10 @@ public class ServerLodEngine extends VoxyInstance {
             return null;
         }
         this.attachDirtyCallback(identifier, world);
+        Identifier dimensionId = dimensionsByWorld.get(identifier);
+        if (dimensionId != null)
+            versions.bootstrap(
+                    dimensionId, consumer -> world.storage.iteratePositions(0, consumer));
         return world;
     }
 
@@ -121,6 +137,10 @@ public class ServerLodEngine extends VoxyInstance {
             return null;
         }
         this.attachDirtyCallback(identifier, world);
+        Identifier dimensionId = dimensionsByWorld.get(identifier);
+        if (dimensionId != null)
+            versions.bootstrap(
+                    dimensionId, consumer -> world.storage.iteratePositions(0, consumer));
         return world;
     }
 
@@ -131,6 +151,11 @@ public class ServerLodEngine extends VoxyInstance {
     @Override
     public void shutdown() {
         super.shutdown();
+        try {
+            versions.markClean();
+        } catch (java.io.IOException failure) {
+            throw new IllegalStateException("Cannot checkpoint LOD versions", failure);
+        }
     }
 
     @Override
@@ -168,6 +193,7 @@ public class ServerLodEngine extends VoxyInstance {
                     (section, updateFlags, neighborMsk) -> {
                         if (world.storage instanceof ImportSectionStorage storage)
                             storage.capture(section);
+                        versions.changed(dimension, section.key);
                         DirtySectionListener listener = this.dirtySectionListener;
                         if (listener != null) {
                             listener.onSectionDirty(dimension, section.key);

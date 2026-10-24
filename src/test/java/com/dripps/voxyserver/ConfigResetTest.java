@@ -31,7 +31,7 @@ public final class ConfigResetTest {
             var current = new VoxyServerConfig();
             current.maintenanceMillisPerSecond = 200;
             current.maxBandwidthBytesPerSec = 0;
-            current.backgroundGenerationChunksPerMinute = 600000;
+            current.sourceColumnRecheckSeconds = 600;
             field.set(null, current);
             var mod = new Mod();
             var dispatcher = new CommandDispatcher<CommandSourceStack>();
@@ -52,7 +52,7 @@ public final class ConfigResetTest {
             require(
                     mod.applied.maintenanceMillisPerSecond == 20
                             && mod.applied.maxBandwidthBytesPerSec == 0
-                            && mod.applied.backgroundGenerationChunksPerMinute == 600000,
+                            && mod.applied.sourceColumnRecheckSeconds == 600,
                     "single reset changed unrelated values");
             require(
                     current.maintenanceMillisPerSecond == 200,
@@ -65,7 +65,7 @@ public final class ConfigResetTest {
             require(
                     dispatcher.execute(
                                             "voxyserver config reset"
-                                                + " MAX_BACKGROUND_CHUNKS_PER_MINUTE",
+                                                    + " MAX_NATIVE_WORKER_THREADS",
                                             source)
                                     == 0
                             && mod.applied == null,
@@ -76,16 +76,6 @@ public final class ConfigResetTest {
             require(
                     mod.applied.lodStreamRadius == 1024 && mod.applied.maxClientVoxyRadius == 1024,
                     "radius aliases desynchronized");
-            current.backgroundGenerationStartMspt = 100;
-            current.backgroundGenerationStopMspt = 200;
-            mod.applied = null;
-            require(
-                    dispatcher.execute(
-                                            "voxyserver config reset backgroundGenerationStopMspt",
-                                            source)
-                                    == 0
-                            && mod.applied == null,
-                    "cross-field invalid reset applied");
             require(
                     dispatcher.execute("voxyserver config reset", source) == 1,
                     "full reset command failed");
@@ -96,9 +86,7 @@ public final class ConfigResetTest {
                             java.util.Objects.equals(f.get(mod.applied), f.get(defaults)),
                             "full reset omitted " + f.getName());
             require(
-                    mod.applied.enabled
-                            && !mod.applied.backgroundGenerationEnabled
-                            && mod.applied.backgroundGenerationChunksPerMinute == 6,
+                    mod.applied.enabled && mod.applied.sourceColumnRecheckSeconds == 180,
                     "reset defaults incorrect");
             System.out.println(
                     "PASS ConfigResetTest: actual administrator commands, single/all defaults,"

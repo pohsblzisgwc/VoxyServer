@@ -11,8 +11,9 @@ public final class NativeNodeInstaller {
 
     public static void install(
             WorldEngine world, long key, long[] palette, short[] indices, byte children) {
-        if (!DemandGroup.valid(key) || indices.length != 32 * 32 * 32 || palette.length == 0)
-            throw new IllegalArgumentException("invalid native node");
+        if (((key & 15) != 0 || WorldEngine.getLevel(key) > 4)
+                || indices.length != 32 * 32 * 32
+                || palette.length == 0) throw new IllegalArgumentException("invalid native node");
         // Validate before acquiring or changing storage, including the final voxel.
         for (short index : indices)
             if ((index & 65535) >= palette.length)

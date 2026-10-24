@@ -20,7 +20,8 @@ final class StoredSectionPresenceIndex {
     private static final long HASH_SEED = 0x9E3779B97F4A7C15L;
 
     private final AtomicLongArray filter = new AtomicLongArray(FILTER_WORDS);
-    private final AtomicReference<BuildState> buildState = new AtomicReference<>(BuildState.UNBUILT);
+    private final AtomicReference<BuildState> buildState =
+            new AtomicReference<>(BuildState.UNBUILT);
 
     BuildState getBuildState() {
         return buildState.get();

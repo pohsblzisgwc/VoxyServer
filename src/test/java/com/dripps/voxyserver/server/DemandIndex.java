@@ -11,6 +11,7 @@ import net.minecraft.core.Registry;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.level.biome.Biome;
 
+import java.util.LinkedHashMap;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -29,15 +30,27 @@ final class DemandIndex {
     private final BoundedLruCache<Key, Node> nodes = new BoundedLruCache<>(65_536);
     private final BoundedLruCache<Key, Long> versions = new BoundedLruCache<>(65_536);
     private final BoundedLruCache<Key, CachedPayload> payloads = new BoundedLruCache<>(128);
-    private final ConcurrentHashMap<Key, Probe> queued = new ConcurrentHashMap<>();
-    private final ConcurrentLinkedQueue<Key> order = new ConcurrentLinkedQueue<>();
+    private final LinkedHashMap<Key, Probe> queued = new LinkedHashMap<>();
+    private final LinkedHashMap<Key, Probe> delivery = new LinkedHashMap<>();
+    private int deliveryTurns;
     private final AtomicLong serial = new AtomicLong(1);
-    long computed, cacheHits, absent, rejected, computeNanos, hashesComputed, hashNanos;
+    long computed,
+            cacheHits,
+            absent,
+            rejected,
+            computeNanos,
+            hashesComputed,
+            hashNanos,
+            payloadMisses,
+            deliveryComputations;
 
     synchronized void invalidate(Identifier dimension, long key) {
         Key k = new Key(dimension, key);
         // Cold edits must not populate or churn an index that nobody requested.
-        if (versions.get(k) == null && nodes.get(k) == null && !queued.containsKey(k)) return;
+        if (versions.get(k) == null
+                && nodes.get(k) == null
+                && !queued.containsKey(k)
+                && !delivery.containsKey(k)) return;
         versions.put(k, serial.incrementAndGet());
         nodes.remove(k);
         payloads.remove(k);
@@ -60,20 +73,38 @@ final class DemandIndex {
     synchronized LODSectionPayload payload(Key k) {
         var data = payloads.get(k);
         var node = get(k.dimension, k.node);
-        return data != null && node != null && data.revision == node.revision ? data.payload : null;
+        if (data != null && node != null && data.revision == node.revision) return data.payload;
+        payloadMisses++;
+        return null;
     }
 
     synchronized boolean request(
             Identifier dimension, long key, WorldIdentifier worldId, Registry<Biome> biomes) {
+        return request(dimension, key, worldId, biomes, false);
+    }
+
+    synchronized boolean request(
+            Identifier dimension,
+            long key,
+            WorldIdentifier worldId,
+            Registry<Biome> biomes,
+            boolean forDelivery) {
         Key k = new Key(dimension, key);
-        if (queued.containsKey(k)) return true;
-        if (queued.size() >= 8192) {
+        if (delivery.containsKey(k)) return true;
+        Probe previous = queued.get(k);
+        if (previous != null) {
+            if (forDelivery) {
+                queued.remove(k);
+                delivery.put(k, previous);
+            }
+            return true;
+        }
+        if (pending() >= 8192) {
             rejected++;
             return false;
         }
         revision(k);
-        queued.put(k, new Probe(k, worldId, biomes));
-        order.add(k);
+        (forDelivery ? delivery : queued).put(k, new Probe(k, worldId, biomes));
         return true;
     }
 
@@ -137,7 +168,7 @@ final class DemandIndex {
             var section = SectionDataAccess.acquireStored(world, p.key.node);
             if (section == null)
                 return null; // A negative lookup consumes I/O budget, not a semantic-hash
-                             // allowance.
+            // allowance.
             try {
                 if (!permitHash.getAsBoolean()) throw HASH_DEFERRED;
                 long began = System.nanoTime();
@@ -162,33 +193,38 @@ final class DemandIndex {
     }
 
     boolean computeOne(java.util.function.Function<Probe, LODSectionPayload> loader) {
-        Key k = order.poll();
-        if (k == null) return false;
         Probe p;
         long before;
+        boolean urgent;
         synchronized (this) {
-            p = queued.remove(k);
-            if (p == null) return true;
-            before = revision(k);
+            urgent = !delivery.isEmpty() && (queued.isEmpty() || deliveryTurns++ % 4 != 3);
+            var queue = urgent ? delivery : queued;
+            if (queue.isEmpty()) return false;
+            var it = queue.values().iterator();
+            p = it.next();
+            it.remove();
+            before = revision(p.key);
+            if (urgent) deliveryComputations++;
         }
+        Key k = p.key;
         long started = System.nanoTime();
         LODSectionPayload payload;
         try {
             payload = loader.apply(p);
         } catch (HashDeferred deferred) {
             synchronized (this) {
-                request(k.dimension, k.node, p.worldId, p.biomes);
+                request(k.dimension, k.node, p.worldId, p.biomes, urgent);
             }
             return false;
         } catch (RuntimeException error) {
             synchronized (this) {
-                request(k.dimension, k.node, p.worldId, p.biomes);
+                request(k.dimension, k.node, p.worldId, p.biomes, urgent);
             }
             throw error;
         }
         synchronized (this) {
             if (revision(k) != before) {
-                request(k.dimension, k.node, p.worldId, p.biomes);
+                request(k.dimension, k.node, p.worldId, p.biomes, urgent);
                 return true;
             }
             if (payload == null) absent++;
@@ -206,8 +242,8 @@ final class DemandIndex {
         return true;
     }
 
-    int pending() {
-        return queued.size();
+    synchronized int pending() {
+        return queued.size() + delivery.size();
     }
 
     synchronized int size() {
@@ -216,7 +252,7 @@ final class DemandIndex {
 
     synchronized void clear() {
         queued.clear();
-        order.clear();
+        delivery.clear();
         nodes.clear();
         versions.clear();
         payloads.clear();

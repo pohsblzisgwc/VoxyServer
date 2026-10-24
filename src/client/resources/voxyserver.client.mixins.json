@@ -3,12 +3,7 @@
   "minVersion": "0.8",
   "package": "com.dripps.voxyserver.client.mixin",
   "compatibilityLevel": "JAVA_25",
-  "client": [
-    "RenderGenerationServiceMixin",
-    "RenderWorldAccessor",
-    "AsyncNodeManagerMixin",
-    "SectionUpdateRouterMixin"
-  ],
+  "client": [],
   "injectors": {
     "defaultRequire": 1
   },

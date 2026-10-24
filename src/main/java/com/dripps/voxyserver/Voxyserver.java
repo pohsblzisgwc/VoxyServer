@@ -31,8 +31,6 @@ public class Voxyserver implements ModInitializer {
     private static volatile VoxyServerConfig config;
     private static volatile boolean snapshotsRequired;
     private final RuntimeSwitch<ServerRuntime> runtime = new RuntimeSwitch<>();
-    private final com.dripps.voxyserver.server.background.GenerationAdmissionState generationDebt =
-            new com.dripps.voxyserver.server.background.GenerationAdmissionState();
     private final Set<UUID> statsSubscribers = ConcurrentHashMap.newKeySet();
     private MinecraftServer server;
     private long lastConfigModified;
@@ -55,12 +53,6 @@ public class Voxyserver implements ModInitializer {
     public WorldImportCoordinator getImportCoordinator() {
         var r = runtime.get();
         return r == null ? null : r.imports();
-    }
-
-    public com.dripps.voxyserver.server.background.BackgroundGenerationController.Stats
-            getBackgroundGenerationStats() {
-        var r = runtime.get();
-        return r == null ? null : r.background().stats();
     }
 
     public void addStatsSubscriber(UUID uuid) {
@@ -91,7 +83,6 @@ public class Voxyserver implements ModInitializer {
     public void onInitialize() {
         config = VoxyServerConfig.load();
         VoxyServerNetworking.register();
-        com.dripps.voxyserver.server.background.BackgroundChunkGeneration.registerTicketType();
         LodStreamingService.registerHandlers(this::getStreamingService);
         ChunkVoxelizer.registerHandlers(
                 () -> {
@@ -101,11 +92,6 @@ public class Voxyserver implements ModInitializer {
         CommandRegistrationCallback.EVENT.register(
                 (dispatcher, registry, environment) ->
                         VoxyServerCommands.register(dispatcher, this));
-        ServerTickEvents.START_SERVER_TICK.register(
-                s -> {
-                    var r = runtime.get();
-                    if (r != null) r.background().startTick();
-                });
         ServerTickEvents.END_SERVER_TICK.register(this::tick);
         ServerLifecycleEvents.SERVER_STARTED.register(
                 s -> {
@@ -152,7 +138,7 @@ public class Voxyserver implements ModInitializer {
         if (server == null || !server.isDedicatedServer()) return;
         try {
             snapshotsRequired = true;
-            runtime.start(() -> new ServerRuntime(server, config, generationDebt));
+            runtime.start(() -> new ServerRuntime(server, config));
             VoxyUpdateChecker.checkForUpdates();
             configCheckCounter = 0;
             statsBroadcastCounter = 0;
@@ -182,7 +168,6 @@ public class Voxyserver implements ModInitializer {
         var r = runtime.get();
         if (r == null)
             return; // No counters, clocks, disk polling or scheduled jobs while disabled.
-        r.background().tick();
         r.streaming().onTick(server);
         r.stats().tick(server, r.streaming().sourceUpdates(), r.streaming().sentNodeCount());
         if (++configCheckCounter >= 20) {

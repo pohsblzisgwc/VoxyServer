@@ -16,7 +16,6 @@ public class VoxyServerConfig {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final String FILE_NAME = "voxyserver.json";
 
-    public static final int MAX_BACKGROUND_CHUNKS_PER_MINUTE = 600_000;
     // Upstream UnifiedServiceThreadPool.shutdown releases 10,000 worker permits.
     public static final int MAX_NATIVE_WORKER_THREADS = 10_000;
 
@@ -27,45 +26,16 @@ public class VoxyServerConfig {
     public int sectionsPerPacket = 16;
     public boolean generateOnChunkLoad = true;
     public boolean generateOnChunkUnload = true;
-    public int tickInterval = 5;
     public int workerThreads = 3;
     public boolean dirtyTrackingEnabled = true;
-    public int dirtyTrackingInterval = 40;
     public boolean debugTrackingEnabled = false;
     public int debugTrackingInterval = 200;
-    public boolean hashSyncEnabled = true;
     public int maintenanceMillisPerSecond = 20;
-    public int maintenanceQuietMillis = 2000;
-    public int maintenanceCooldownMillis = 10_000;
-    public int maxDemandRequestsPerSecond = 20;
-    public int hashWorkIntervalTicks = 20;
-    public int maxHashComputationsPerInterval = 64;
-    public int maxHashMillisPerInterval = 10;
-    public int hashRecheckIntervalTicks = 1200;
-    public int manifestRefreshIntervalTicks = 600;
+    public int maintenanceQuietMillis = 5000;
+    public int maintenanceCooldownMillis = 30_000;
+    public int maintenanceCooldownJitterMillis = 30_000;
+    public int sourceColumnRecheckSeconds = 180;
     public int maxBandwidthBytesPerSec = 250_000;
-    public boolean enableDistancePacing = true;
-    public boolean enableRegionHashSync = false;
-
-    public boolean backgroundGenerationEnabled = false;
-    public int backgroundGenerationMinRadiusChunks = 16;
-    public int backgroundGenerationMaxRadiusChunks = 64;
-    public int backgroundGenerationChunksPerMinute = 6;
-    public int backgroundGenerationMaxConcurrent = 1;
-    public int backgroundGenerationCheckIntervalTicks = 100;
-    public int backgroundGenerationCandidatesPerPass = 4;
-    public int backgroundGenerationMaxProbeMillis = 1;
-    public double backgroundGenerationStartMspt = 25.0;
-    public double backgroundGenerationStopMspt = 35.0;
-    public int backgroundGenerationResumeDelayTicks = 600;
-    public int backgroundGenerationTimeoutSeconds = 20;
-    public int backgroundGenerationKeepLoadedTicks = 60;
-    public int backgroundGenerationMaxPendingLodSections = 256;
-    public int backgroundGenerationHistorySize = 4096;
-    public int backgroundGenerationRecheckSeconds = 600;
-    public List<String> backgroundGenerationDimensions =
-            new ArrayList<>(List.of("minecraft:overworld"));
-    public boolean backgroundGenerationIncludeSpectators = false;
 
     public static Path getConfigPath() {
         return FabricLoader.getInstance().getConfigDir().resolve(FILE_NAME);
@@ -82,88 +52,19 @@ public class VoxyServerConfig {
             errors.add("lodStreamRadius must be 1..4096 (protocol bound), got " + lodStreamRadius);
         positive(errors, "maxSectionsPerTickPerPlayer", maxSectionsPerTickPerPlayer);
         positive(errors, "sectionsPerPacket", sectionsPerPacket);
-        positive(errors, "tickInterval", tickInterval);
         if (workerThreads < 1 || workerThreads > MAX_NATIVE_WORKER_THREADS)
             errors.add(
                     "workerThreads must be 1.."
                             + MAX_NATIVE_WORKER_THREADS
                             + " (native pool shutdown bound), got "
                             + workerThreads);
-        positive(errors, "dirtyTrackingInterval", dirtyTrackingInterval);
         positive(errors, "debugTrackingInterval", debugTrackingInterval);
         nonnegative(errors, "maxBandwidthBytesPerSec", maxBandwidthBytesPerSec);
-        positive(errors, "hashWorkIntervalTicks", hashWorkIntervalTicks);
-        positive(errors, "maxHashComputationsPerInterval", maxHashComputationsPerInterval);
-        positive(errors, "maxHashMillisPerInterval", maxHashMillisPerInterval);
-        positive(errors, "hashRecheckIntervalTicks", hashRecheckIntervalTicks);
-        positive(errors, "manifestRefreshIntervalTicks", manifestRefreshIntervalTicks);
         positive(errors, "maintenanceMillisPerSecond", maintenanceMillisPerSecond);
         nonnegative(errors, "maintenanceQuietMillis", maintenanceQuietMillis);
         nonnegative(errors, "maintenanceCooldownMillis", maintenanceCooldownMillis);
-        positive(errors, "maxDemandRequestsPerSecond", maxDemandRequestsPerSecond);
-        nonnegative(
-                errors, "backgroundGenerationMinRadiusChunks", backgroundGenerationMinRadiusChunks);
-        if (backgroundGenerationMaxRadiusChunks < 1
-                || backgroundGenerationMaxRadiusChunks <= backgroundGenerationMinRadiusChunks)
-            errors.add(
-                    "backgroundGenerationMaxRadiusChunks must be positive and greater than the"
-                        + " minimum radius, got "
-                            + backgroundGenerationMaxRadiusChunks);
-        if (backgroundGenerationChunksPerMinute < 1
-                || backgroundGenerationChunksPerMinute > MAX_BACKGROUND_CHUNKS_PER_MINUTE)
-            errors.add(
-                    "backgroundGenerationChunksPerMinute must be 1.."
-                            + MAX_BACKGROUND_CHUNKS_PER_MINUTE
-                            + ", got "
-                            + backgroundGenerationChunksPerMinute);
-        positive(errors, "backgroundGenerationMaxConcurrent", backgroundGenerationMaxConcurrent);
-        positive(
-                errors,
-                "backgroundGenerationCheckIntervalTicks",
-                backgroundGenerationCheckIntervalTicks);
-        positive(
-                errors,
-                "backgroundGenerationCandidatesPerPass",
-                backgroundGenerationCandidatesPerPass);
-        positive(errors, "backgroundGenerationMaxProbeMillis", backgroundGenerationMaxProbeMillis);
-        if (!Double.isFinite(backgroundGenerationStartMspt) || backgroundGenerationStartMspt <= 0)
-            errors.add(
-                    "backgroundGenerationStartMspt must be finite and positive, got "
-                            + backgroundGenerationStartMspt);
-        if (!Double.isFinite(backgroundGenerationStopMspt)
-                || backgroundGenerationStopMspt <= backgroundGenerationStartMspt)
-            errors.add(
-                    "backgroundGenerationStopMspt must be finite and greater than start MSPT, got "
-                            + backgroundGenerationStopMspt);
-        nonnegative(
-                errors,
-                "backgroundGenerationResumeDelayTicks",
-                backgroundGenerationResumeDelayTicks);
-        positive(errors, "backgroundGenerationTimeoutSeconds", backgroundGenerationTimeoutSeconds);
-        nonnegative(
-                errors, "backgroundGenerationKeepLoadedTicks", backgroundGenerationKeepLoadedTicks);
-        nonnegative(
-                errors,
-                "backgroundGenerationMaxPendingLodSections",
-                backgroundGenerationMaxPendingLodSections);
-        nonnegative(errors, "backgroundGenerationHistorySize", backgroundGenerationHistorySize);
-        nonnegative(
-                errors, "backgroundGenerationRecheckSeconds", backgroundGenerationRecheckSeconds);
-        if (backgroundGenerationDimensions == null || backgroundGenerationDimensions.isEmpty())
-            errors.add("backgroundGenerationDimensions must not be empty");
-        else {
-            var seen = new java.util.HashSet<String>();
-            for (String dimension : backgroundGenerationDimensions)
-                if (dimension == null
-                        || net.minecraft.resources.Identifier.tryParse(dimension) == null
-                        || !dimension.contains(":"))
-                    errors.add(
-                            "backgroundGenerationDimensions contains an invalid namespaced"
-                                + " identifier: "
-                                    + dimension);
-                else if (!seen.add(dimension))
-                    errors.add("backgroundGenerationDimensions contains a duplicate: " + dimension);
-        }
+        nonnegative(errors, "maintenanceCooldownJitterMillis", maintenanceCooldownJitterMillis);
+        nonnegative(errors, "sourceColumnRecheckSeconds", sourceColumnRecheckSeconds);
         return errors;
     }
 
@@ -186,6 +87,10 @@ public class VoxyServerConfig {
             VoxyServerConfig candidate =
                     GSON.fromJson(Files.readString(path), VoxyServerConfig.class);
             if (candidate == null) throw new IllegalArgumentException("configuration is null");
+            if (Files.readString(path).contains("backgroundGeneration"))
+                Voxyserver.LOGGER.warn(
+                        "backgroundGeneration settings are obsolete and ignored; automatic chunk"
+                            + " loading has been removed");
             candidate.requireValid();
             if (candidate.maxClientVoxyRadius != 1024)
                 candidate.lodStreamRadius = candidate.maxClientVoxyRadius;
@@ -229,7 +134,6 @@ public class VoxyServerConfig {
         try {
             for (var field : VoxyServerConfig.class.getFields())
                 if (!java.lang.reflect.Modifier.isStatic(field.getModifiers())
-                        && !field.getName().startsWith("backgroundGeneration")
                         && !java.util.Objects.equals(field.get(this), field.get(other)))
                     return false;
             return true;

@@ -2,9 +2,11 @@ package com.dripps.voxyserver.client.mixin;
 
 import com.dripps.voxyserver.client.service.IVoxyServerIngestAccess;
 import com.dripps.voxyserver.client.service.RemoteIngestService;
+
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.thread.ServiceManager;
 import me.cortex.voxy.commonImpl.VoxyInstance;
+
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
@@ -15,8 +17,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(VoxyInstance.class)
 public abstract class VoxyInstanceMixin implements IVoxyServerIngestAccess {
 
-    @Unique
-    private RemoteIngestService voxyserver$remoteIngestService;
+    @Unique private RemoteIngestService voxyserver$remoteIngestService;
 
     @Shadow
     public abstract ServiceManager getServiceManager();
@@ -27,14 +28,13 @@ public abstract class VoxyInstanceMixin implements IVoxyServerIngestAccess {
         this.voxyserver$remoteIngestService = new RemoteIngestService(this.getServiceManager());
     }
 
-
     @Inject(
             method = "shutdown()V",
-            at = @At(
-                    value = "INVOKE",
-                    target = "Lme/cortex/voxy/common/world/service/VoxelIngestService;shutdown()V"
-            )
-    )
+            at =
+                    @At(
+                            value = "INVOKE",
+                            target =
+                                    "Lme/cortex/voxy/common/world/service/VoxelIngestService;shutdown()V"))
     private void voxyserver$shutdown(CallbackInfo ci) {
         Logger.info("shutting down RemoteIngestService");
         try {
@@ -44,6 +44,15 @@ public abstract class VoxyInstanceMixin implements IVoxyServerIngestAccess {
         }
     }
 
+    @Inject(method = "shutdown()V", at = @At("HEAD"))
+    private void voxyserver$stopProofs(CallbackInfo ci) {
+        com.dripps.voxyserver.client.ClientDemand.prepareNativeShutdown();
+    }
+
+    @Inject(method = "shutdown()V", at = @At("RETURN"))
+    private void voxyserver$versionsSaved(CallbackInfo ci) {
+        com.dripps.voxyserver.client.ClientDemand.nativeClosed();
+    }
 
     @Override
     public RemoteIngestService voxyserver$getRemoteIngestService() {

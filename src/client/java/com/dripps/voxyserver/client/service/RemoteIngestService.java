@@ -1,21 +1,15 @@
 package com.dripps.voxyserver.client.service;
 
-import com.dripps.voxyserver.client.ClientLodHashStore;
-import com.dripps.voxyserver.client.ClientLodSettings;
-import com.dripps.voxyserver.util.SemanticSectionHash;
-import com.dripps.voxyserver.util.SemanticPalette;
-import com.dripps.voxyserver.sync.NativeNodeCodec;
-import com.dripps.voxyserver.sync.DemandGroup;
 import com.dripps.voxyserver.client.ClientDemand;
 import com.dripps.voxyserver.network.LODBatchResultPayload;
-import com.dripps.voxyserver.network.LODBulkPayload;
-import com.dripps.voxyserver.network.LODSectionPayload;
 import com.dripps.voxyserver.network.PreSerializedLodPayload;
+
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.thread.ServiceManager;
 import me.cortex.voxy.common.world.WorldEngine;
 import me.cortex.voxy.common.world.other.Mapper;
 import me.cortex.voxy.commonImpl.WorldIdentifier;
+
 import net.minecraft.core.Holder;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
@@ -46,24 +40,26 @@ public final class RemoteIngestService {
     private volatile long activeEpoch;
     private volatile boolean live = true;
     // Ingest worker only. Report on activity; no diagnostic timer/thread.
-    private long installedBatches,lastInstallReport;
-    private final long[] installedByLod=new long[5];
+    private long installedBatches, lastInstallReport;
+    private final long[] installedByLod = new long[5];
 
     private final class IngestTask implements Runnable {
         private final WorldIdentifier worldId;
         private final Identifier dimension;
         private final PreSerializedLodPayload raw;
         private final RegistryAccess registryAccess;
-        private final String hashStoreKey;
         private final long taskGeneration;
         private final Consumer<LODBatchResultPayload> completion;
         private final AtomicBoolean completed = new AtomicBoolean();
 
-        private IngestTask(WorldIdentifier worldId, Identifier dimension,
-                           PreSerializedLodPayload raw, RegistryAccess registryAccess,
-                           long taskGeneration, Consumer<LODBatchResultPayload> completion) {
+        private IngestTask(
+                WorldIdentifier worldId,
+                Identifier dimension,
+                PreSerializedLodPayload raw,
+                RegistryAccess registryAccess,
+                long taskGeneration,
+                Consumer<LODBatchResultPayload> completion) {
             this.worldId = worldId;
-            this.hashStoreKey = ClientLodSettings.hashStoreKey(worldId.getWorldId());
             this.dimension = dimension;
             this.raw = raw;
             this.registryAccess = registryAccess;
@@ -91,35 +87,42 @@ public final class RemoteIngestService {
 
         private void finish(int status) {
             if (completed.compareAndSet(false, true)) {
-                completion.accept(new LODBatchResultPayload(raw.streamEpoch(), raw.batchId(), status));
+                completion.accept(
+                        new LODBatchResultPayload(raw.streamEpoch(), raw.batchId(), status));
             }
         }
     }
 
     public RemoteIngestService(ServiceManager ignored) {
-        executor = new ThreadPoolExecutor(
-                WORKERS,
-                WORKERS,
-                0L,
-                TimeUnit.MILLISECONDS,
-                new ArrayBlockingQueue<>(MAX_QUEUED_BATCHES),
-                runnable -> {
-                    Thread thread = new Thread(runnable, "VoxyServer Remote Ingest");
-                    thread.setDaemon(true);
-                    return thread;
-                },
-                new ThreadPoolExecutor.AbortPolicy()
-        );
+        executor =
+                new ThreadPoolExecutor(
+                        WORKERS,
+                        WORKERS,
+                        0L,
+                        TimeUnit.MILLISECONDS,
+                        new ArrayBlockingQueue<>(MAX_QUEUED_BATCHES),
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "VoxyServer Remote Ingest");
+                            thread.setDaemon(true);
+                            return thread;
+                        },
+                        new ThreadPoolExecutor.AbortPolicy());
     }
 
-    public boolean enqueueIngest(WorldIdentifier worldId, Identifier dimension,
-                                 PreSerializedLodPayload raw, RegistryAccess registryAccess,
-                                 Consumer<LODBatchResultPayload> completion) {
-        if (!live || raw.streamEpoch() != activeEpoch || !Objects.equals(dimension, activeDimension)) {
+    public boolean enqueueIngest(
+            WorldIdentifier worldId,
+            Identifier dimension,
+            PreSerializedLodPayload raw,
+            RegistryAccess registryAccess,
+            Consumer<LODBatchResultPayload> completion) {
+        if (!live
+                || raw.streamEpoch() != activeEpoch
+                || !Objects.equals(dimension, activeDimension)) {
             return false;
         }
-        IngestTask task = new IngestTask(
-                worldId, dimension, raw, registryAccess, generation.get(), completion);
+        IngestTask task =
+                new IngestTask(
+                        worldId, dimension, raw, registryAccess, generation.get(), completion);
         try {
             executor.execute(task);
             return true;
@@ -130,17 +133,16 @@ public final class RemoteIngestService {
 
     public void startSession(Identifier dimension, long epoch) {
         synchronized (sessionLock) {
-        if (activeEpoch == epoch && Objects.equals(activeDimension, dimension)) return;
-        activeDimension = dimension;
-        activeEpoch = epoch;
-        generation.incrementAndGet();
-        Runnable queued;
-        while ((queued = executor.getQueue().poll()) != null) {
-            if (queued instanceof IngestTask task) task.cancel();
+            if (activeEpoch == epoch && Objects.equals(activeDimension, dimension)) return;
+            activeDimension = dimension;
+            activeEpoch = epoch;
+            generation.incrementAndGet();
+            Runnable queued;
+            while ((queued = executor.getQueue().poll()) != null) {
+                if (queued instanceof IngestTask task) task.cancel();
+            }
         }
     }
-
-        }
 
     public boolean isLive() {
         return live && !executor.isShutdown();
@@ -163,75 +165,57 @@ public final class RemoteIngestService {
         } catch (InterruptedException ignored) {
             Thread.currentThread().interrupt();
         }
-        ClientLodHashStore.get().flush();
     }
 
     private int process(IngestTask task) {
         if (!isCurrent(task)) return LODBatchResultPayload.STALE;
-        LODBulkPayload bulk = task.raw.decodeBulk(task.registryAccess);
-        if (bulk.sections().size() != task.raw.sectionCount()
-                || !task.dimension.equals(bulk.dimension())) return LODBatchResultPayload.FAILURE;
-        if (!isCurrent(task)) return LODBatchResultPayload.STALE;
-
+        var nodes =
+                com.dripps.voxyserver.network.VersionedNodePayload.decodeBatch(
+                        task.raw.data(), task.registryAccess);
+        if (nodes.size() != task.raw.sectionCount()) return LODBatchResultPayload.FAILURE;
         WorldEngine engine = task.worldId.getOrCreateEngine();
         if (engine == null || !engine.isLive()) return LODBatchResultPayload.FAILURE;
         engine.acquireRef();
         try {
-            engine.markActive();
-            Registry<Biome> semanticBiomes = task.registryAccess.lookupOrThrow(Registries.BIOME);
-            for (LODSectionPayload section : bulk.sections()) {
-                long actual = SemanticSectionHash.compute(SemanticPalette.resolve(section.lutBlockStateIds(),
-                        section.lutBiomeIds(), section.lutLight(), semanticBiomes), section.indexArray());
-                if (!task.dimension.equals(section.dimension()) || !DemandGroup.valid(section.sectionKey())
-                        || NativeNodeCodec.proofHash(actual,section.childMask()) != section.contentHash()) return LODBatchResultPayload.FAILURE;
-            }
-            Mapper mapper = engine.getMapper();
-            long[] keys = new long[bulk.sections().size()];
-            long[] hashes = new long[bulk.sections().size()];
-
-            for (int sectionIndex = 0; sectionIndex < bulk.sections().size(); sectionIndex++) {
-                if (!isCurrent(task)) return LODBatchResultPayload.STALE;
-                LODSectionPayload section = bulk.sections().get(sectionIndex);
-                if (!task.dimension.equals(section.dimension())) return LODBatchResultPayload.FAILURE;
-                long[] remappedLut = remapLut(
-                        section.lutBlockStateIds(),
-                        section.lutBiomeIds(),
-                        section.lutLight(),
-                        mapper,
-                        task.registryAccess
-                );
-
+            var palettes = new java.util.ArrayList<long[]>();
+            // Resolve and validate every registry ID before mutating the first node.
+            for (var node : nodes)
+                palettes.add(
+                        remapLut(
+                                node.states(),
+                                node.biomes(),
+                                node.light(),
+                                engine.getMapper(),
+                                task.registryAccess));
+            for (int i = 0; i < nodes.size(); i++) {
+                var node = nodes.get(i);
+                var palette = palettes.get(i);
                 synchronized (sessionLock) {
                     if (!isCurrent(task)) return LODBatchResultPayload.STALE;
-                    boolean applied = ClientDemand.install(task.raw, section.sectionKey(), () -> {
-                        synchronized (engine) {
-                            com.dripps.voxyserver.sync.NativeNodeInstaller.install(engine, section.sectionKey(),
-                                    remappedLut, section.indexArray(), section.childMask());
-                            ClientDemand.nodeReceived(engine, section.sectionKey(), section.childMask(),
-                                    task.raw.streamEpoch(), task.raw.demandRequestId());
-                        }
-                    });
-                    if (!applied) return LODBatchResultPayload.STALE;
+                    if (!ClientDemand.install(
+                            task.raw,
+                            node,
+                            engine,
+                            () ->
+                                    com.dripps.voxyserver.sync.NativeNodeInstaller.install(
+                                            engine,
+                                            node.key(),
+                                            palette,
+                                            node.indices(),
+                                            node.children()))) return LODBatchResultPayload.STALE;
                 }
-                keys[sectionIndex] = section.sectionKey();
-                hashes[sectionIndex] = section.contentHash();
-            }
-
-            if (!isCurrent(task)) return LODBatchResultPayload.STALE;
-            if (!ClientLodHashStore.get().recordBatch(task.hashStoreKey, keys, hashes)) {
-                return LODBatchResultPayload.FAILURE;
             }
             installedBatches++;
-            int minY=Integer.MAX_VALUE,maxY=Integer.MIN_VALUE;
-            for(var section:bulk.sections()) {
-                int level=WorldEngine.getLevel(section.sectionKey());installedByLod[level]++;
-                int y=WorldEngine.getY(section.sectionKey())*(32<<level);
-                minY=Math.min(minY,y);maxY=Math.max(maxY,y+(32<<level));
-            }
-            long now=System.nanoTime();
-            if(installedBatches==1 || now-lastInstallReport>=10_000_000_000L) {
-                lastInstallReport=now;
-                Logger.info("remote LOD installed: batches="+installedBatches+" nodesByLod="+java.util.Arrays.toString(installedByLod)+" recentBlockY="+minY+".."+maxY);
+            installedByLod[0] += nodes.size();
+            long now = System.nanoTime();
+            if (installedBatches == 1 || now - lastInstallReport >= 10_000_000_000L) {
+                lastInstallReport = now;
+                Logger.info(
+                        "remote LOD0 installed: batches="
+                                + installedBatches
+                                + " nodes="
+                                + installedByLod[0]
+                                + "; parents generated locally");
             }
             return LODBatchResultPayload.SUCCESS;
         } finally {
@@ -246,9 +230,14 @@ public final class RemoteIngestService {
                 && Objects.equals(task.dimension, activeDimension);
     }
 
-    private static long[] remapLut(int[] blockStateIds, int[] biomeIds, byte[] light,
-                                   Mapper mapper, RegistryAccess registryAccess) {
-        if (blockStateIds.length == 0 || blockStateIds.length != biomeIds.length
+    private static long[] remapLut(
+            int[] blockStateIds,
+            int[] biomeIds,
+            byte[] light,
+            Mapper mapper,
+            RegistryAccess registryAccess) {
+        if (blockStateIds.length == 0
+                || blockStateIds.length != biomeIds.length
                 || blockStateIds.length != light.length) {
             throw new IllegalArgumentException("invalid lookup table");
         }
@@ -256,9 +245,13 @@ public final class RemoteIngestService {
         long[] remapped = new long[blockStateIds.length];
         for (int i = 0; i < blockStateIds.length; i++) {
             BlockState state = Block.BLOCK_STATE_REGISTRY.byId(blockStateIds[i]);
-            int clientBlockId = state != null ? mapper.getIdForBlockState(state) : 0;
+            if (state == null) throw new IllegalArgumentException("unknown block state ID");
+            int clientBlockId = mapper.getIdForBlockState(state);
             Optional<Holder.Reference<Biome>> biomeHolder = biomeRegistry.get(biomeIds[i]);
-            int clientBiomeId = biomeHolder.map(mapper::getIdForBiome).orElse(0);
+            int clientBiomeId =
+                    mapper.getIdForBiome(
+                            biomeHolder.orElseThrow(
+                                    () -> new IllegalArgumentException("unknown biome ID")));
             remapped[i] = Mapper.composeMappingId(light[i], clientBlockId, clientBiomeId);
         }
         return remapped;

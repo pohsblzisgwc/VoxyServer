@@ -1,16 +1,20 @@
 package com.dripps.voxyserver.network;
 
-import io.netty.buffer.Unpooled;
-import net.minecraft.core.RegistryAccess;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.resources.Identifier;
 
-// wraps preserialized LODBulkPayload bytes so the heavy encoding
+// Wraps versioned LOD0 batch bytes so the heavy encoding
 // happens on the streaming thread instead of the tick thread
-public record PreSerializedLodPayload(long streamEpoch, long batchId, int sectionCount,
-                                      byte[] data, long demandGroup, long demandRequestId) implements CustomPacketPayload {
+public record PreSerializedLodPayload(
+        long streamEpoch,
+        long batchId,
+        int sectionCount,
+        byte[] data,
+        long demandGroup,
+        long demandRequestId)
+        implements CustomPacketPayload {
 
     public static final int MAX_ENCODED_BYTES = 8 * 1024 * 1024;
     public static final int MAX_SECTIONS = 16;
@@ -26,7 +30,11 @@ public record PreSerializedLodPayload(long streamEpoch, long batchId, int sectio
     }
 
     public PreSerializedLodPayload {
-        if (demandRequestId < 0 || (demandRequestId != 0 && !com.dripps.voxyserver.sync.DemandGroup.validGroup(demandGroup)))
+        if (demandRequestId < 0
+                || (demandRequestId != 0
+                        && ((demandGroup & 15) != 0
+                                || me.cortex.voxy.common.world.WorldEngine.getLevel(demandGroup)
+                                        > 4)))
             throw new IllegalArgumentException("invalid demand delivery");
         if (data == null) {
             throw new IllegalArgumentException("data cannot be null");
@@ -58,47 +66,19 @@ public record PreSerializedLodPayload(long streamEpoch, long batchId, int sectio
         }
         byte[] data = new byte[len];
         buf.readBytes(data);
-        return new PreSerializedLodPayload(streamEpoch, batchId, sectionCount, data, demandGroup, demandRequestId);
-    }
-
-    // encodes an LODBulkPayload to preserialized bytes on the calling thread
-    public static PreSerializedLodPayload fromBulk(LODBulkPayload bulk, RegistryAccess registryAccess) {
-        var raw = Unpooled.buffer(256, MAX_ENCODED_BYTES);
-        try {
-            var rfb = new RegistryFriendlyByteBuf(raw, registryAccess);
-            LODBulkPayload.CODEC.encode(rfb, bulk);
-            byte[] bytes = new byte[rfb.readableBytes()];
-            rfb.readBytes(bytes);
-            if (bytes.length > MAX_ENCODED_BYTES) {
-                throw new IllegalArgumentException("preserialized payload too large: " + bytes.length);
-            }
-            return new PreSerializedLodPayload(0L, 0L, bulk.sections().size(), bytes);
-        } finally {
-            raw.release();
-        }
+        return new PreSerializedLodPayload(
+                streamEpoch, batchId, sectionCount, data, demandGroup, demandRequestId);
     }
 
     public PreSerializedLodPayload withDelivery(long streamEpoch, long batchId) {
         validate(streamEpoch, batchId, this.sectionCount, this.data.length);
-        return new PreSerializedLodPayload(streamEpoch, batchId, this.sectionCount, this.data, demandGroup, demandRequestId);
+        return new PreSerializedLodPayload(
+                streamEpoch, batchId, this.sectionCount, this.data, demandGroup, demandRequestId);
     }
 
     public PreSerializedLodPayload withDemand(long group, long request) {
-        return new PreSerializedLodPayload(streamEpoch, batchId, sectionCount, data, group, request);
-    }
-
-    public LODBulkPayload decodeBulk(RegistryAccess registryAccess) {
-        var raw = Unpooled.wrappedBuffer(data);
-        try {
-            var rfb = new RegistryFriendlyByteBuf(raw, registryAccess);
-            LODBulkPayload decoded = LODBulkPayload.CODEC.decode(rfb);
-            if (rfb.readableBytes() != 0) {
-                throw new IllegalArgumentException("trailing preserialized data");
-            }
-            return decoded;
-        } finally {
-            raw.release();
-        }
+        return new PreSerializedLodPayload(
+                streamEpoch, batchId, sectionCount, data, group, request);
     }
 
     @Override

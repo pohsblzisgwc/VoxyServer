@@ -4,34 +4,31 @@ import com.dripps.voxyserver.Voxyserver;
 import com.dripps.voxyserver.config.VoxyServerConfig;
 import com.dripps.voxyserver.network.*;
 import com.dripps.voxyserver.server.throttle.*;
-import com.dripps.voxyserver.sync.*;
-import com.dripps.voxyserver.util.HashWorkBudget;
+import com.dripps.voxyserver.sync.SectionDataAccess;
+import com.dripps.voxyserver.sync.version.*;
+import com.dripps.voxyserver.util.*;
 
+import me.cortex.voxy.common.world.WorldEngine;
 import me.cortex.voxy.commonImpl.WorldIdentifier;
 
 import net.fabricmc.fabric.api.networking.v1.*;
-import net.minecraft.core.Registry;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.*;
-import net.minecraft.world.level.biome.Biome;
 
 import java.util.*;
 import java.util.concurrent.*;
 
-/**
- * Client-driven native-LOD subscriptions. The server never enumerates a player's spatial grid or
- * the database.
- */
+/** Full-range, client-led version reconciliation. Only final LOD0 delivery uses rate budgets. */
 public final class LodStreamingService {
     private final ServerLodEngine engine;
     private volatile VoxyServerConfig config;
     private volatile MinecraftServer server;
-    private volatile long tick;
+    private volatile boolean closed;
+    private long tick, lastCheckpoint;
+    private boolean resumed;
     private final ConcurrentHashMap<UUID, State> players = new ConcurrentHashMap<>();
-    private final DemandIndex index = new DemandIndex();
-    private final SourceMaintenance source;
     private final ScheduledExecutorService worker =
             Executors.newSingleThreadScheduledExecutor(
                     r -> {
@@ -40,150 +37,175 @@ public final class LodStreamingService {
                         t.setPriority(Thread.MIN_PRIORITY);
                         return t;
                     });
-    private final HashWorkBudget heavyBudget = new HashWorkBudget(),
-            hashBudget = new HashWorkBudget();
-    private final FairWorkQueue<UUID, Request> requests = new FairWorkQueue<>(256, 4);
-    private final DelayQueue<Send> ready = new DelayQueue<>();
-    private final ConcurrentHashMap<GroupId, Set<UUID>> subscriptions = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<GroupId, Boolean> changed = new ConcurrentHashMap<>();
-    private long sentNodes, summaryMatches, detailRequests, requestsRejected;
-    private boolean started, preferIndex;
-    private volatile boolean closed;
-    private final com.dripps.voxyserver.util.CoalescedWakeup sourceWake;
-    private long lastLeaseSweep, workTurn, lastCheckpoint;
-    private volatile long workerCpuNanos, workerWallNanos, workerCycles, maxQuantumNanos;
-    private final java.lang.management.ThreadMXBean cpu =
-            java.lang.management.ManagementFactory.getThreadMXBean();
-
-    private record GroupId(Identifier dimension, long key) {}
-
-    private record Request(
-            State state,
-            LODDemandPayload payload,
-            WorldIdentifier worldId,
-            Registry<Biome> biomes) {}
-
-    private record Send(State state, long group, long request, long epoch, long due)
-            implements Delayed {
-        @Override
-        public long getDelay(TimeUnit unit) {
-            return unit.convert(due - System.nanoTime(), TimeUnit.NANOSECONDS);
-        }
-
-        @Override
-        public int compareTo(Delayed other) {
-            return Long.compare(due, ((Send) other).due);
-        }
-    }
-
-    private GroupId notifyingGroup;
-    private Iterator<UUID> notifying;
-
-    private record Delivery(long group, long request, long slots) {}
-
-    private static final class Gate extends DemandProofState {
-        Gate(long request, long wanted) {
-            super(request, wanted);
-        }
-
-        long expires, nextSend;
-        int attempts;
-        boolean queued, highPriority;
-        WorldIdentifier worldId;
-        Registry<Biome> biomes;
-    }
+    private final MaintenanceBudget workBudget = new MaintenanceBudget();
+    private final CoalescedWakeup wake = new CoalescedWakeup(worker, this::cycle, () -> closed);
+    private final SourceMaintenance source;
+    private long sentNodes,
+            roundsCompleted,
+            roundsFailed,
+            busyRejected,
+            ackTimeouts,
+            workerNanos,
+            cycles,
+            maxQuantum;
+    private int playerTurn;
 
     private static final class State {
         final UUID id;
-        final PlayerLodTracker tracker = new PlayerLodTracker();
-        final Map<Long, Gate> groups = new HashMap<>();
-        final Map<Long, Delivery> deliveries = new HashMap<>();
-        final com.dripps.voxyserver.util.BoundedLruCache<Long, Long> retired =
-                new com.dripps.voxyserver.util.BoundedLruCache<>(4096);
-        volatile Identifier dimension;
-        long rateWindow;
-        int rateUsed;
-        long requestsSeen,
-                rateRejected,
-                rangeRejected,
-                queueRejected,
-                sourcePendingReplies,
-                detailReplies,
-                sentNodes;
+        final ArrayDeque<net.minecraft.network.protocol.common.custom.CustomPacketPayload>
+                controls = new ArrayDeque<>();
+        Identifier dimension;
+        java.util.UUID authority;
+        final RoundAdmission admission = new RoundAdmission();
+        long lastCompletedRound;
+        int lastCompletedSelectionPage;
+        long epoch, batchSequence, sent, failedBatches, retries, requests, scopeRejected;
+        boolean ready, protocolOk, enabled = true;
+        int radius, maxSections;
+        Round round;
 
         State(UUID id) {
             this.id = id;
         }
     }
 
+    private static final class Round {
+        final long id;
+        final Identifier dimension;
+        final VersionScope scope;
+        final ServerLevel level;
+        final WorldIdentifier world;
+        final SummaryAssembly summary;
+        final BitSet offered = new BitSet();
+        long lastActivity = System.nanoTime(), retryAt;
+        int rootCursor,
+                changedRoots,
+                tableOffset,
+                selectionPages,
+                selectionPage = -1,
+                lastCompletedPage = -1,
+                attempts;
+        boolean tablesCompleteQueued;
+        int[] tableValues;
+        long[] tableKeys;
+        int[] tableVersions;
+        long previousLastKey = -1;
+        long tableRoot, tableDigest;
+        long[] selectionKeys;
+        int[] selectionVersions;
+        final BitSet completed = new BitSet();
+        Flight flight;
+
+        Round(long id, VersionScope scope, ServerLevel level) {
+            this.id = id;
+            dimension = level.dimension().identifier();
+            this.scope = scope;
+            summary = new SummaryAssembly(scope);
+            this.level = level;
+            world = WorldIdentifier.of(level);
+        }
+    }
+
+    private static final class Flight {
+        final long id;
+        final int[] positions;
+        final PlayerOutboundQueue.QueuedPacket packet;
+        final BatchReceipt receipt;
+
+        Flight(long id, int[] positions, PlayerOutboundQueue.QueuedPacket packet) {
+            this.id = id;
+            this.positions = positions;
+            this.packet = packet;
+            receipt = new BatchReceipt(packet.streamEpoch(), id);
+        }
+    }
+
     public LodStreamingService(ServerLodEngine engine, VoxyServerConfig config) {
         this.engine = engine;
         this.config = config;
-        sourceWake =
-                new com.dripps.voxyserver.util.CoalescedWakeup(worker, this::cycle, () -> closed);
         source =
                 new SourceMaintenance(
                         engine,
                         engine.maintenanceJournal(),
                         config.maintenanceQuietMillis,
                         config.maintenanceCooldownMillis,
-                        this::wakeWorker);
-        engine.setDirtySectionListener(
-                (dimension, key) -> {
-                    index.invalidate(dimension, key);
-                    GroupId group = new GroupId(dimension, DemandGroup.of(key));
-                    if (subscriptions.containsKey(group)) changed.put(group, Boolean.TRUE);
-                });
+                        wake::request);
+        source.dirty.updateTiming(
+                config.maintenanceQuietMillis * 1_000_000L,
+                config.maintenanceCooldownMillis * 1_000_000L,
+                config.maintenanceCooldownJitterMillis * 1_000_000L);
     }
 
-    /** Register once; callbacks retain only the owner lookup, never a stopped world/runtime. */
     public static void registerHandlers(java.util.function.Supplier<LodStreamingService> active) {
         ServerPlayConnectionEvents.JOIN.register(
-                (handler, sender, server) -> {
-                    var service = active.get();
-                    if (service != null) service.onJoin(handler.getPlayer());
+                (h, s, server) -> {
+                    var a = active.get();
+                    if (a != null) a.onJoin(h.getPlayer());
                 });
         ServerPlayConnectionEvents.DISCONNECT.register(
-                (handler, server) -> {
-                    var service = active.get();
-                    if (service != null) service.onDisconnect(handler.getPlayer());
+                (h, server) -> {
+                    var a = active.get();
+                    if (a != null) a.onDisconnect(h.getPlayer());
                 });
         ServerPlayNetworking.registerGlobalReceiver(
                 LODHandshakePayload.TYPE,
-                (p, ctx) -> {
-                    var service = active.get();
-                    if (service != null) service.onHandshake(ctx.player(), p);
-                    else if (ServerPlayNetworking.canSend(ctx.player(), LODProtocolPayload.TYPE))
-                        ServerPlayNetworking.send(ctx.player(), new LODProtocolPayload(0));
+                (p, c) -> {
+                    var a = active.get();
+                    if (a != null) a.handshake(c.player(), p);
+                    else if (ServerPlayNetworking.canSend(c.player(), LODProtocolPayload.TYPE))
+                        ServerPlayNetworking.send(c.player(), new LODProtocolPayload(0));
                 });
         ServerPlayNetworking.registerGlobalReceiver(
                 LODPreferencesPayload.TYPE,
-                (p, ctx) -> {
-                    var service = active.get();
-                    if (service != null) service.onPreferences(ctx.player(), p);
+                (p, c) -> {
+                    var a = active.get();
+                    if (a != null) a.preferences(c.player(), p);
                 });
         ServerPlayNetworking.registerGlobalReceiver(
-                LODDemandPayload.TYPE,
-                (p, ctx) -> {
-                    var service = active.get();
-                    if (service != null) service.receive(ctx.player(), p);
+                VersionCancelPayload.TYPE,
+                (p, c) -> {
+                    var a = active.get();
+                    if (a != null) {
+                        var s = a.players.get(c.player().getUUID());
+                        if (a.current(s, p.epoch()))
+                            synchronized (s) {
+                                if (s.round != null && s.round.id == p.round()) a.fail(s, s.round);
+                            }
+                    }
+                });
+        ServerPlayNetworking.registerGlobalReceiver(
+                VersionBeginPayload.TYPE,
+                (p, c) -> {
+                    var a = active.get();
+                    if (a != null) a.begin(c.player(), p);
+                });
+        ServerPlayNetworking.registerGlobalReceiver(
+                VersionSummaryPayload.TYPE,
+                (p, c) -> {
+                    var a = active.get();
+                    if (a != null) a.receiveSummary(c.player(), p);
+                });
+        ServerPlayNetworking.registerGlobalReceiver(
+                VersionSelectPayload.TYPE,
+                (p, c) -> {
+                    var a = active.get();
+                    if (a != null) a.receiveSelection(c.player(), p);
                 });
         ServerPlayNetworking.registerGlobalReceiver(
                 LODBatchResultPayload.TYPE,
-                (p, ctx) -> {
-                    var service = active.get();
-                    if (service != null) service.onBatchResult(ctx.player(), p);
+                (p, c) -> {
+                    var a = active.get();
+                    if (a != null) a.result(c.player(), p);
                 });
     }
 
     public void start(MinecraftServer server) {
         this.server = server;
-        for (var player : server.getPlayerList().getPlayers()) {
-            onJoin(player);
-            // A version advertisement resumes a paused upgraded client, which re-handshakes.
-            if (ServerPlayNetworking.canSend(player, LODProtocolPayload.TYPE))
+        for (var p : server.getPlayerList().getPlayers()) {
+            onJoin(p);
+            if (ServerPlayNetworking.canSend(p, LODProtocolPayload.TYPE))
                 ServerPlayNetworking.send(
-                        player, new LODProtocolPayload(VoxyServerNetworking.PROTOCOL_VERSION));
+                        p, new LODProtocolPayload(VoxyServerNetworking.PROTOCOL_VERSION));
         }
         startWorker();
     }
@@ -192,690 +214,593 @@ public final class LodStreamingService {
         worker.scheduleWithFixedDelay(this::cycle, 50, 50, TimeUnit.MILLISECONDS);
     }
 
-    private void onJoin(ServerPlayer player) {
-        players.put(player.getUUID(), new State(player.getUUID()));
-        BandwidthThrottler.INSTANCE.registerPlayer(
-                player.getUUID(), config.maxBandwidthBytesPerSec);
+    private void onJoin(ServerPlayer p) {
+        players.put(p.getUUID(), new State(p.getUUID()));
+        BandwidthThrottler.INSTANCE.registerPlayer(p.getUUID(), config.maxBandwidthBytesPerSec);
     }
 
-    private void onDisconnect(ServerPlayer player) {
-        var state = players.remove(player.getUUID());
-        if (state != null) closeState(state);
-        BandwidthThrottler.INSTANCE.unregisterPlayer(player.getUUID());
+    private void onDisconnect(ServerPlayer p) {
+        var s = players.remove(p.getUUID());
+        if (s != null) clear(s);
+        BandwidthThrottler.INSTANCE.unregisterPlayer(p.getUUID());
     }
 
-    private void onHandshake(ServerPlayer player, LODHandshakePayload payload) {
+    private void handshake(ServerPlayer p, LODHandshakePayload h) {
+        var s = players.get(p.getUUID());
+        if (s == null) return;
+        s.ready = true;
+        s.protocolOk = h.protocol() == VoxyServerNetworking.PROTOCOL_VERSION;
+        ServerPlayNetworking.send(p, new LODProtocolPayload(VoxyServerNetworking.PROTOCOL_VERSION));
+        if (s.protocolOk) {
+            settings(p);
+            session(p, s);
+        }
+    }
 
-        var state = players.get(player.getUUID());
-        if (state == null) return;
-        state.tracker.setReady(true);
-        state.tracker.setProtocolOk(payload.protocol() == VoxyServerNetworking.PROTOCOL_VERSION);
-        if (ServerPlayNetworking.canSend(player, LODProtocolPayload.TYPE))
+    private void preferences(ServerPlayer p, LODPreferencesPayload q) {
+        var s = players.get(p.getUUID());
+        if (s == null) return;
+        synchronized (s) {
+            boolean wasEnabled = s.enabled;
+            s.enabled = q.enabled();
+            s.radius = q.lodStreamRadius();
+            s.maxSections = q.maxSectionsPerTick();
+            if (!s.enabled) clear(s);
+            else if (!wasEnabled && s.ready && s.protocolOk) session(p, s);
+            // Range changes affect the next grant. Repeated preferences never replace a transfer.
+        }
+    }
+
+    private void settings(ServerPlayer p) {
+        ServerPlayNetworking.send(
+                p,
+                new LODServerSettingsPayload(
+                        config.maxClientVoxyRadius, config.maxSectionsPerTickPerPlayer));
+    }
+
+    private void session(ServerPlayer p, State s) {
+        synchronized (s) {
+            clear(s);
+            s.dimension = p.level().dimension().identifier();
+            s.epoch = SessionEpoch.next();
+            s.authority = engine.versions().namespace();
+            s.admission.reset();
+            s.lastCompletedRound = 0;
             ServerPlayNetworking.send(
-                    player, new LODProtocolPayload(VoxyServerNetworking.PROTOCOL_VERSION));
-        if (state.tracker.isProtocolOk()) {
-            sendSettings(player);
-            newSession(player, state);
+                    p,
+                    new VersionSessionPayload(
+                            s.dimension,
+                            s.epoch,
+                            engine.getWorldIdentity(),
+                            engine.versions().namespace()));
         }
     }
 
-    private void onPreferences(ServerPlayer player, LODPreferencesPayload p) {
-
-        var state = players.get(player.getUUID());
-        if (state == null) return;
-        state.tracker.setLodEnabled(p.enabled());
-        state.tracker.setPreferredRadius(p.lodStreamRadius());
-        state.tracker.setPreferredMaxSections(p.maxSectionsPerTick());
-        if (state.tracker.isReady() && state.tracker.isProtocolOk()) newSession(player, state);
+    private boolean current(State s, long epoch) {
+        return s != null && s.ready && s.protocolOk && s.enabled && s.epoch == epoch && !closed;
     }
 
-    private void onBatchResult(ServerPlayer player, LODBatchResultPayload p) {
-
-        var state = players.get(player.getUUID());
-        if (state == null) return;
-        synchronized (state) {
-            if (!state.tracker.completeDemandBatch(
-                    p.streamEpoch(),
-                    p.batchId(),
-                    p.status() == LODBatchResultPayload.SUCCESS,
-                    tick)) return;
-            Delivery delivered = state.deliveries.remove(p.batchId());
-            if (delivered == null) return;
-            Gate gate = state.groups.get(delivered.group);
-            if (gate != null && gate.request == delivered.request) {
-                if (p.status() == LODBatchResultPayload.SUCCESS) {
-                    gate.confirm(delivered.request, delivered.slots, true);
-                    gate.attempts = 0;
-                } else {
-                    gate.nextSend = System.nanoTime() + 5_000_000_000L;
-                    gate.attempts++;
-                }
-                schedule(state, delivered.group, gate);
-            }
-        }
+    private void status(State s, long round, int status, int page, int count) {
+        // Per-player metadata is bounded independently of the terrain byte/token queue.
+        if (s.controls.size() < 16)
+            s.controls.add(new VersionStatusPayload(s.epoch, round, status, page, count));
     }
 
-    private void receive(ServerPlayer player, LODDemandPayload p) {
-        State state = players.get(player.getUUID());
-        if (state != null) state.requestsSeen++;
-        if (state == null
-                || !state.tracker.isReady()
-                || !state.tracker.isProtocolOk()
-                || !state.tracker.isLodEnabled()
-                || p.epoch() != state.tracker.streamEpoch()
-                || !p.dimension().equals(player.level().dimension().identifier())) return;
-        synchronized (state) {
-            long window = tick / 20;
-            if (state.rateWindow != window) {
-                state.rateWindow = window;
-                state.rateUsed = 0;
-            }
-            if (state.rateUsed >= config.maxDemandRequestsPerSecond) {
-                state.rateRejected++;
-                requestsRejected++;
+    private void begin(ServerPlayer player, VersionBeginPayload p) {
+        State s = players.get(player.getUUID());
+        if (!current(s, p.epoch())) return;
+        synchronized (s) {
+            s.requests++;
+            var admission = s.admission.begin(p.round());
+            if (admission == RoundAdmission.Result.BUSY) {
+                busyRejected++;
+                status(s, p.round(), VersionStatusPayload.BUSY, 0, 0);
                 return;
             }
-            state.rateUsed++;
-        }
-        int radius = state.tracker.getEffectiveRadius(config.maxClientVoxyRadius);
-        if (p.phase() != LODDemandPayload.CANCEL)
-            for (int i = 0; i < 64; i++)
-                if ((p.wanted() & (1L << i)) != 0
-                        && !DemandGroup.allowed(
-                                DemandGroup.node(p.group(), i),
+            if (admission == RoundAdmission.Result.STALE) {
+                status(s, p.round(), VersionStatusPayload.STALE, 0, 0);
+                return;
+            }
+            if (admission == RoundAdmission.Result.NEW) {
+                int cap =
+                        s.radius <= 0
+                                ? config.maxClientVoxyRadius
+                                : Math.min(s.radius, config.maxClientVoxyRadius);
+                var level = player.level();
+                var scope =
+                        new VersionScope(
                                 player.getBlockX(),
                                 player.getBlockZ(),
-                                radius,
-                                player.level().getMinY(),
-                                player.level().getMaxY())) {
-                    state.rangeRejected++;
-                    requestsRejected++;
-                    reply(state, p, LODDemandReplyPayload.REJECTED, 0, 0, 0);
-                    return;
-                }
-        WorldIdentifier world = WorldIdentifier.of(player.level());
-        if (world == null) return;
-        if (!requests.offer(
-                state.id,
-                new Request(
-                        state,
-                        p,
-                        world,
-                        player.level().registryAccess().lookupOrThrow(Registries.BIOME)))) {
-            state.queueRejected++;
-            requestsRejected++;
-            reply(state, p, LODDemandReplyPayload.PENDING, 0, 0, 0);
+                                Math.min(p.radiusChunks(), cap),
+                                level.getMinY(),
+                                level.getMinY() + level.getHeight(),
+                                Math.max(
+                                        level.getMinY(),
+                                        Math.min(level.getMaxY(), player.getBlockY())));
+                s.round = new Round(p.round(), scope, level);
+            }
+            if (s.round != null && s.controls.size() < 16)
+                s.controls.add(
+                        new VersionScopePayload(
+                                s.epoch, p.round(), s.round.dimension, s.round.scope));
         }
     }
 
-    private void process(Request request) {
-        var state = request.state;
-        var p = request.payload;
-        if (players.get(state.id) != state || p.epoch() != state.tracker.streamEpoch()) return;
-        synchronized (state) {
-            if (players.get(state.id) != state || p.epoch() != state.tracker.streamEpoch()) return;
-            Long retired = state.retired.get(p.group());
-            if (retired != null && p.requestId() <= retired) return;
-            Gate previous = state.groups.get(p.group());
-            if (previous != null && p.requestId() < previous.request) return;
-            if (p.phase() == LODDemandPayload.CANCEL) {
-                if (previous != null && p.requestId() >= previous.request) {
-                    supersede(state, p.group(), previous.wanted);
-                    state.groups.remove(p.group());
-                    unsubscribe(state, p.group());
-                }
-                state.retired.put(p.group(), p.requestId());
+    private void receiveSummary(ServerPlayer player, VersionSummaryPayload p) {
+        State s = players.get(player.getUUID());
+        if (!current(s, p.epoch())) return;
+        synchronized (s) {
+            Round r = s.round;
+            if (r == null || r.id != p.round()) {
+                status(
+                        s,
+                        p.round(),
+                        r == null ? VersionStatusPayload.STALE : VersionStatusPayload.BUSY,
+                        0,
+                        0);
                 return;
             }
-            if (previous == null || p.requestId() > previous.request) {
-                if (p.phase() != LODDemandPayload.SUMMARY
-                        || (previous == null && state.groups.size() >= 1024)) {
-                    reply(state, p, LODDemandReplyPayload.REJECTED, 0, 0, 0);
-                    return;
-                }
-                if (previous != null) supersede(state, p.group(), previous.wanted);
-                var gate = new Gate(p.requestId(), p.wanted());
-                gate.highPriority = previous != null && previous.invalidated;
-                gate.worldId = request.worldId;
-                gate.biomes = request.biomes;
-                gate.expires = System.nanoTime() + 600_000_000_000L;
-                state.groups.put(p.group(), gate);
-                subscriptions
-                        .computeIfAbsent(
-                                new GroupId(p.dimension(), p.group()),
-                                k -> ConcurrentHashMap.newKeySet())
-                        .add(state.id);
-                previous = gate;
+            if (!r.scope.equals(p.scope()) || !r.dimension.equals(p.dimension())) {
+                s.scopeRejected++;
+                fail(s, r);
+                return;
             }
-            if (previous.wanted != p.wanted()) {
-                reply(state, p, LODDemandReplyPayload.REJECTED, 0, 0, 0);
+            try {
+                r.summary.add(p.page(), p.pages(), p.digests());
+                r.lastActivity = System.nanoTime();
+            } catch (IllegalArgumentException e) {
+                fail(s, r);
                 return;
             }
         }
-        DemandIndex.Proof proof = index.proof(p.dimension(), p.group(), p.wanted());
-        if (proof == null) {
-            state.sourcePendingReplies++;
-            for (int i = 0; i < 64; i++)
-                if ((p.wanted() & (1L << i)) != 0) {
-                    long key = DemandGroup.node(p.group(), i);
-                    if (index.get(p.dimension(), key) == null)
-                        index.request(p.dimension(), key, request.worldId, request.biomes);
+        wake.request();
+    }
+
+    private void receiveSelection(ServerPlayer player, VersionSelectPayload p) {
+        State s = players.get(player.getUUID());
+        if (!current(s, p.epoch())) return;
+        synchronized (s) {
+            Round r = s.round;
+            if (r == null && p.round() == s.lastCompletedRound) {
+                status(s, p.round(), VersionStatusPayload.DONE, s.lastCompletedSelectionPage, 0);
+                return;
+            }
+            if (r == null || r.id != p.round()) {
+                status(
+                        s,
+                        p.round(),
+                        r == null ? VersionStatusPayload.STALE : VersionStatusPayload.BUSY,
+                        0,
+                        0);
+                return;
+            }
+            if (!r.tablesCompleteQueued) {
+                fail(s, r);
+                return;
+            }
+            if (p.page() == r.lastCompletedPage) {
+                status(s, r.id, VersionStatusPayload.PAGE_DONE, p.page(), 0);
+                return;
+            }
+            if (r.selectionKeys != null) {
+                if (p.page() != r.selectionPage
+                        || p.pages() != r.selectionPages
+                        || !Arrays.equals(p.keys(), r.selectionKeys)
+                        || !Arrays.equals(p.versions(), r.selectionVersions)) fail(s, r);
+                return;
+            }
+            if (p.page() != r.lastCompletedPage + 1
+                    || (r.selectionPages != 0 && p.pages() != r.selectionPages)) {
+                fail(s, r);
+                return;
+            }
+            if (p.keys().length > 0
+                    && r.lastCompletedPage >= 0
+                    && r.scope.compareDelivery(p.keys()[0], r.previousLastKey) <= 0) {
+                fail(s, r);
+                return;
+            }
+            for (int i = 1; i < p.keys().length; i++)
+                if (r.scope.compareDelivery(p.keys()[i - 1], p.keys()[i]) >= 0) {
+                    fail(s, r);
+                    return;
                 }
-            reply(state, p, LODDemandReplyPayload.PENDING, 0, 0, 0);
-            return;
+            for (long key : p.keys())
+                if (!r.scope.contains(key)
+                        || !r.offered.get(r.scope.rootIndex(VersionScope.root(key)))) {
+                    fail(s, r);
+                    return;
+                }
+            r.selectionPages = p.pages();
+            r.selectionPage = p.page();
+            r.selectionKeys = p.keys().clone();
+            r.selectionVersions = p.versions().clone();
+            r.completed.clear();
+            r.lastActivity = System.nanoTime();
+            if (p.keys().length == 0) completePage(s, r);
         }
-        synchronized (index) {
-            synchronized (state) {
-                if (p.epoch() != state.tracker.streamEpoch()
-                        || !index.current(p.dimension(), p.group(), p.wanted(), proof.revision()))
-                    return;
-                Gate gate = state.groups.get(p.group());
-                if (gate == null || gate.request != p.requestId()) return;
-                gate.expires = System.nanoTime() + 600_000_000_000L;
-                if (gate.invalidated) {
-                    reply(
-                            state,
-                            p,
-                            LODDemandReplyPayload.INVALIDATED,
-                            gate.coverage,
-                            gate.revision,
-                            0);
-                    return;
-                }
-                long present = proof.coverage(), revision = proof.revision();
-                long[] hashes = proof.hashes();
-                if (p.phase() == LODDemandPayload.SUMMARY) {
-                    int status =
-                            gate.summary(
-                                    present,
-                                    revision,
-                                    hashes,
-                                    p.coverage(),
-                                    p.root(),
-                                    config.hashSyncEnabled);
-                    if (status == LODDemandReplyPayload.MATCH) summaryMatches++;
-                    reply(state, p, status, gate.coverage, gate.revision, gate.needed);
-                } else {
-                    boolean alreadyDetailed = gate.detailed;
-                    int status =
-                            gate.detail(
-                                    present,
-                                    revision,
-                                    p.revision(),
-                                    p.coverage(),
-                                    p.hashes(),
-                                    config.hashSyncEnabled);
-                    if (status == LODDemandReplyPayload.INVALIDATED) {
-                        invalidate(state, p.group(), gate);
-                        return;
+        wake.request();
+    }
+
+    private void result(ServerPlayer p, LODBatchResultPayload result) {
+        State s = players.get(p.getUUID());
+        if (!current(s, result.streamEpoch())) return;
+        synchronized (s) {
+            Round r = s.round;
+            if (r == null
+                    || r.flight == null
+                    || r.flight.id != result.batchId()
+                    || !r.flight.receipt.acknowledge(result.streamEpoch(), result.batchId()))
+                return;
+            Flight f = r.flight;
+            r.flight = null;
+            r.lastActivity = System.nanoTime();
+            if (result.status() == LODBatchResultPayload.SUCCESS) {
+                for (int i : f.positions) r.completed.set(i);
+                r.attempts = 0;
+                if (r.completed.cardinality() == r.selectionKeys.length) completePage(s, r);
+            } else retry(s, r);
+        }
+        wake.request();
+    }
+
+    private void completePage(State s, Round r) {
+        r.lastCompletedPage = r.selectionPage;
+        if (r.selectionKeys.length > 0)
+            r.previousLastKey = r.selectionKeys[r.selectionKeys.length - 1];
+        r.selectionKeys = null;
+        r.selectionVersions = null;
+        r.completed.clear();
+        if (r.lastCompletedPage + 1 == r.selectionPages) {
+            status(s, r.id, VersionStatusPayload.DONE, r.lastCompletedPage, 0);
+            s.admission.finish(r.id);
+            s.lastCompletedRound = r.id;
+            s.lastCompletedSelectionPage = r.lastCompletedPage;
+            s.round = null;
+            roundsCompleted++;
+        } else status(s, r.id, VersionStatusPayload.PAGE_DONE, r.lastCompletedPage, 0);
+    }
+
+    private void retry(State s, Round r) {
+        s.failedBatches++;
+        s.retries++;
+        r.attempts++;
+        r.retryAt = System.nanoTime() + 5_000_000_000L;
+        if (r.attempts >= 8) fail(s, r);
+    }
+
+    private void fail(State s, Round r) {
+        if (s.round != r) return;
+        BandwidthThrottler.INSTANCE.clearPlayerQueue(s.id);
+        r.flight = null;
+        s.admission.finish(r.id);
+        s.round = null;
+        roundsFailed++;
+        status(s, r.id, VersionStatusPayload.FAILED, Math.max(0, r.selectionPage), 0);
+    }
+
+    private void clear(State s) {
+        synchronized (s) {
+            if (s.round != null) s.admission.finish(s.round.id);
+            s.round = null;
+            s.controls.clear();
+            BandwidthThrottler.INSTANCE.clearPlayerQueue(s.id);
+        }
+    }
+
+    /** Emits at most one bounded metadata page, without terrain bandwidth/rate throttling. */
+    private boolean metadata(State s) {
+        Round r;
+        synchronized (s) {
+            r = s.round;
+            if (r == null
+                    || !r.summary.complete()
+                    || r.tablesCompleteQueued
+                    || s.controls.size() >= 16) return false;
+        }
+        // Never hold a player monitor during inventory/storage access: the tick thread uses it.
+        if (engine.getOrCreate(r.world, r.dimension) == null)
+            throw new IllegalStateException("LOD world unavailable");
+        if (r.tableValues == null) {
+            int checks = 0;
+            while (r.rootCursor < r.scope.rootCount() && checks++ < 64) {
+                int index = r.rootCursor++;
+                long root = r.scope.rootAt(index);
+                long digest = engine.versions().digest(r.dimension, root, r.scope);
+                if (digest == r.summary.digest(index)) continue;
+                r.offered.set(index);
+                r.changedRoots++;
+                r.tableRoot = root;
+                r.tableValues = engine.versions().snapshot(r.dimension, root, r.scope);
+                r.tableDigest = VersionDigest.compute(r.tableValues, null, root);
+                r.tableOffset = 0;
+                int count = 0;
+                for (int v : r.tableValues) if (v > 0) count++;
+                r.tableKeys = new long[count];
+                r.tableVersions = new int[count];
+                int n = 0;
+                for (int i = 0; i < 4096; i++)
+                    if (r.tableValues[i] > 0) {
+                        r.tableKeys[n] = VersionScope.node(root, i);
+                        r.tableVersions[n++] = r.tableValues[i];
                     }
-                    if (!alreadyDetailed) {
-                        detailRequests++;
-                        state.detailReplies++;
+                break;
+            }
+            if (r.tableValues == null) {
+                synchronized (s) {
+                    if (s.round != r) return false;
+                    if (r.rootCursor == r.scope.rootCount()) {
+                        r.tablesCompleteQueued = true;
+                        status(s, r.id, VersionStatusPayload.TABLES_COMPLETE, 0, r.changedRoots);
                     }
-                    reply(state, p, status, gate.coverage, gate.revision, gate.needed);
-                    schedule(state, p.group(), gate);
                 }
+                return true;
             }
         }
-    }
-
-    private void schedule(State state, long group, Gate gate) {
-        if (gate.needed != 0 && !gate.invalidated && !gate.queued) {
-            gate.queued = true;
-            ready.add(
-                    new Send(
-                            state,
-                            group,
-                            gate.request,
-                            state.tracker.streamEpoch(),
-                            gate.nextSend));
+        int total = Math.max(1, (r.tableKeys.length + 255) / 256),
+                page = r.tableOffset / 256,
+                end = Math.min(r.tableOffset + 256, r.tableKeys.length);
+        var payload =
+                new VersionTablePayload(
+                        s.epoch,
+                        r.id,
+                        r.tableRoot,
+                        r.tableDigest,
+                        page,
+                        total,
+                        Arrays.copyOfRange(r.tableKeys, r.tableOffset, end),
+                        Arrays.copyOfRange(r.tableVersions, r.tableOffset, end));
+        synchronized (s) {
+            if (s.round != r || s.controls.size() >= 16) return false;
+            s.controls.add(payload);
+            r.tableOffset = end;
+            r.lastActivity = System.nanoTime();
+            if (page + 1 == total) {
+                r.tableValues = null;
+                r.tableKeys = null;
+                r.tableVersions = null;
+            }
         }
+        return true;
     }
 
-    private void sendNodes(Send work) {
-        State state = work.state;
-        Gate gate;
-        long wanted;
+    /** One in-flight batch per player; selected pages hold at most 256 node IDs. */
+    private boolean deliver(State s) {
+        Round r;
+        long epoch;
         Identifier dimension;
-        synchronized (state) {
-            gate = state.groups.get(work.group);
-            if (gate == null
-                    || gate.request != work.request
-                    || work.epoch != state.tracker.streamEpoch()) return;
-            gate.queued = false;
-            if (gate.needed == 0) return;
-            if (gate.nextSend > System.nanoTime()) {
-                schedule(state, work.group, gate);
-                return;
+        int[] positions;
+        long[] keys;
+        synchronized (s) {
+            r = s.round;
+            if (r == null
+                    || r.selectionKeys == null
+                    || r.flight != null
+                    || System.nanoTime() < r.retryAt) return false;
+            int limit =
+                    Math.min(
+                            16,
+                            Math.min(
+                                    config.sectionsPerPacket,
+                                    s.maxSections <= 0
+                                            ? config.maxSectionsPerTickPerPlayer
+                                            : Math.min(
+                                                    s.maxSections,
+                                                    config.maxSectionsPerTickPerPlayer)));
+            var pos = new ArrayList<Integer>();
+            for (int i = r.completed.nextClearBit(0);
+                    i < r.selectionKeys.length && pos.size() < limit;
+                    i = r.completed.nextClearBit(i + 1)) pos.add(i);
+            if (pos.isEmpty()) {
+                completePage(s, r);
+                return true;
             }
-            if (gate.attempts >= 8) {
-                invalidate(state, work.group, gate);
-                return;
-            }
-            wanted = gate.needed;
-            dimension = state.dimension;
+            positions = pos.stream().mapToInt(Integer::intValue).toArray();
+            keys = new long[positions.length];
+            for (int i = 0; i < keys.length; i++) keys[i] = r.selectionKeys[positions[i]];
+            epoch = s.epoch;
+            dimension = s.dimension;
         }
-        var batch = new ArrayList<LODSectionPayload>();
-        long slots = 0;
-        for (int i = 0;
-                i < 64
-                        && batch.size()
-                                < Math.min(
-                                        Math.min(16, config.sectionsPerPacket),
-                                        state.tracker.getEffectiveMaxSections(
-                                                config.maxSectionsPerTickPerPlayer));
-                i++)
-            if ((wanted & (1L << i)) != 0) {
-                long key = DemandGroup.node(work.group, i);
-                if (state.tracker.hasOutstanding(key)) continue;
-                var node = index.get(dimension, key);
-                if (node == null || !node.present()) {
-                    synchronized (state) {
-                        invalidate(state, work.group, gate);
+        WorldEngine world = engine.getOrCreate(r.world, dimension);
+        if (world == null) throw new IllegalStateException("LOD world unavailable");
+        world.acquireRef();
+        var nodes = new ArrayList<VersionedNodePayload>();
+        try {
+            for (long key : keys) {
+                synchronized (world) {
+                    var section = SectionDataAccess.acquireStored(world, key);
+                    if (section == null)
+                        throw new IllegalStateException("selected LOD0 node unavailable: " + key);
+                    try {
+                        int version = engine.versions().get(dimension, key);
+                        if (version < 1) throw new IllegalStateException("missing LOD0 version");
+                        nodes.add(
+                                VersionedNodePayload.encode(
+                                        key,
+                                        version,
+                                        section.copyData(),
+                                        section.getNonEmptyChildren(),
+                                        world.getMapper(),
+                                        r.level.registryAccess().lookupOrThrow(Registries.BIOME)));
+                    } finally {
+                        section.release();
                     }
-                    return;
                 }
-                var payload = index.payload(new DemandIndex.Key(dimension, key));
-                if (payload == null) {
-                    index.request(dimension, key, gate.worldId, gate.biomes);
-                    continue;
-                }
-                if (payload.contentHash() != gate.hashes[i]) {
-                    synchronized (state) {
-                        invalidate(state, work.group, gate);
-                    }
-                    return;
-                }
-                batch.add(payload);
-                slots |= 1L << i;
             }
-        if (batch.isEmpty()) {
-            synchronized (state) {
-                gate.nextSend = System.nanoTime() + 500_000_000L;
-                schedule(state, work.group, gate);
-            }
-            return;
+        } finally {
+            world.releaseRef();
         }
-        // Encoding, registry resolution and storage are exclusively on this worker, outside
-        // player-state monitors.
-        var packet =
-                PreSerializedLodPayload.fromBulk(
-                                new LODBulkPayload(dimension, List.copyOf(batch)),
-                                server.registryAccess())
-                        .withDemand(work.group, work.request);
-        long[] keys = batch.stream().mapToLong(LODSectionPayload::sectionKey).toArray();
-        long[] hashes = batch.stream().mapToLong(LODSectionPayload::contentHash).toArray();
-        synchronized (index) {
-            synchronized (state) {
-                if (state.groups.get(work.group) != gate
-                        || gate.request != work.request
-                        || work.epoch != state.tracker.streamEpoch()) return;
-                if (!index.current(dimension, work.group, gate.wanted, gate.revision)) {
-                    invalidate(state, work.group, gate);
-                    return;
-                }
-                var delivery =
-                        state.tracker.reserveBatch(
-                                dimension,
-                                state.tracker.streamEpoch(),
-                                keys,
-                                hashes,
-                                packet.data().length,
-                                tick);
-                if (delivery == null) {
-                    gate.nextSend = System.nanoTime() + 1_000_000_000L;
-                    schedule(state, work.group, gate);
-                    return;
-                }
-                state.deliveries.put(
-                        delivery.batchId(), new Delivery(work.group, work.request, slots));
-                packet = packet.withDelivery(delivery.streamEpoch(), delivery.batchId());
-                var evicted = new ArrayList<PlayerOutboundQueue.QueuedPacket>();
-                boolean accepted =
-                        BandwidthThrottler.INSTANCE.enqueuePacket(
-                                state.id,
-                                new PlayerOutboundQueue.QueuedPacket(
-                                        packet,
-                                        dimension,
-                                        delivery.streamEpoch(),
-                                        delivery.batchId(),
-                                        gate.highPriority,
-                                        System.nanoTime()),
-                                evicted);
-                for (var old : evicted) failQueued(state, old);
-                if (!accepted)
-                    failQueued(
-                            state,
-                            new PlayerOutboundQueue.QueuedPacket(
-                                    packet,
-                                    dimension,
-                                    delivery.streamEpoch(),
-                                    delivery.batchId(),
-                                    false,
-                                    0));
+        byte[] data = VersionedNodePayload.encodeBatch(nodes, server.registryAccess());
+        synchronized (s) {
+            if (s.round != r || s.epoch != epoch || r.flight != null) return true;
+            long batch = ++s.batchSequence;
+            var raw = new PreSerializedLodPayload(epoch, batch, nodes.size(), data, 0, r.id);
+            var packet =
+                    new PlayerOutboundQueue.QueuedPacket(
+                            raw, dimension, epoch, batch, false, System.nanoTime());
+            r.flight = new Flight(batch, positions, packet);
+            var evicted = new ArrayList<PlayerOutboundQueue.QueuedPacket>();
+            boolean accepted = BandwidthThrottler.INSTANCE.enqueuePacket(s.id, packet, evicted);
+            if (!accepted || !evicted.isEmpty()) {
+                BandwidthThrottler.INSTANCE.clearPlayerQueue(s.id);
+                r.flight = null;
+                retry(s, r);
             }
         }
-    }
-
-    private void failQueued(State state, PlayerOutboundQueue.QueuedPacket packet) {
-        state.tracker.completeDemandBatch(packet.streamEpoch(), packet.batchId(), false, tick);
-        Delivery old = state.deliveries.remove(packet.batchId());
-        if (old == null) return;
-        Gate gate = state.groups.get(old.group);
-        if (gate != null && gate.request == old.request) {
-            gate.attempts++;
-            gate.nextSend = System.nanoTime() + 5_000_000_000L;
-            schedule(state, old.group, gate);
-        }
-    }
-
-    private void supersede(State state, long group, long mask) {
-        var keys = new long[Long.bitCount(mask)];
-        int n = 0;
-        for (int i = 0; i < 64; i++)
-            if ((mask & (1L << i)) != 0) keys[n++] = DemandGroup.node(group, i);
-        state.tracker.supersedeSections(keys);
-        var deliveries = state.deliveries.entrySet().iterator();
-        while (deliveries.hasNext()) {
-            var old = deliveries.next();
-            if (old.getValue().group != group) continue;
-            state.tracker.completeDemandBatch(
-                    state.tracker.streamEpoch(), old.getKey(), false, tick);
-            deliveries.remove();
-        }
-    }
-
-    private void invalidate(State state, long group, Gate gate) {
-        if (state.groups.get(group) != gate || gate.invalidated) return;
-        gate.invalidated = true;
-        supersede(state, group, gate.wanted);
-        gate.needed = 0;
-        send(
-                state,
-                new LODDemandReplyPayload(
-                        state.dimension,
-                        state.tracker.streamEpoch(),
-                        gate.request,
-                        group,
-                        LODDemandReplyPayload.INVALIDATED,
-                        gate.wanted,
-                        gate.coverage,
-                        gate.revision,
-                        0));
-    }
-
-    private void unsubscribe(State state, long group) {
-        var id = new GroupId(state.dimension, group);
-        subscriptions.computeIfPresent(
-                id,
-                (key, set) -> {
-                    set.remove(state.id);
-                    return set.isEmpty() ? null : set;
-                });
-    }
-
-    private void reply(
-            State state,
-            LODDemandPayload p,
-            int status,
-            long coverage,
-            long revision,
-            long needed) {
-        send(
-                state,
-                new LODDemandReplyPayload(
-                        p.dimension(),
-                        p.epoch(),
-                        p.requestId(),
-                        p.group(),
-                        status,
-                        p.wanted(),
-                        coverage,
-                        revision,
-                        needed));
-    }
-
-    private void send(State state, LODDemandReplyPayload reply) {
-        var current = server;
-        if (current == null) return;
-        current.execute(
-                () -> {
-                    if (closed) return;
-                    ServerPlayer p = current.getPlayerList().getPlayer(state.id);
-                    if (!closed
-                            && p != null
-                            && players.get(state.id) == state
-                            && reply.epoch() == state.tracker.streamEpoch()
-                            && p.level().dimension().identifier().equals(reply.dimension()))
-                        ServerPlayNetworking.send(p, reply);
-                });
-    }
-
-    private void wakeWorker() {
-        sourceWake.request();
+        return true;
     }
 
     private void cycle() {
         if (closed || server == null) return;
-        long cycleStarted = System.nanoTime(),
-                cpuStarted =
-                        cpu.isCurrentThreadCpuTimeSupported() ? cpu.getCurrentThreadCpuTime() : 0;
+        long start = System.nanoTime();
         try {
+            List<State> states = new ArrayList<>(players.values());
+            // Fair bounded work scheduling, not a per-second control-message rate limiter.
+            long controlStart = System.nanoTime();
+            int turns = 0;
+            while (!states.isEmpty()
+                    && turns++ < 64
+                    && System.nanoTime() - controlStart < 5_000_000L) {
+                State s = states.get(Math.floorMod(playerTurn++, states.size()));
+                boolean did = metadata(s);
+                if (!did && turns >= states.size()) break;
+            }
             long now = System.nanoTime();
-            int idleTurns = 0;
-            // Yield between maintenance turns even when the administrator grants >=1 s/s.
             while (!closed
-                    && now - cycleStarted < 50_000_000L
-                    && heavyBudget.tryAcquire(
+                    && now - start < 50_000_000L
+                    && workBudget.tryAcquire(
                             now / 50_000_000L,
                             20,
                             Integer.MAX_VALUE,
                             TimeUnit.MILLISECONDS.toNanos(config.maintenanceMillisPerSecond))) {
                 long began = System.nanoTime();
-                boolean did = false;
-                switch ((int) (workTurn++ % 5)) {
-                    case 0 -> {
-                        Request request = requests.poll();
-                        if (request != null) {
-                            process(request);
-                            did = true;
+                boolean did = source.step(server);
+                if (!states.isEmpty()) {
+                    State s = states.get(Math.floorMod(playerTurn++, states.size()));
+                    try {
+                        did = deliver(s) || did;
+                    } catch (Exception e) {
+                        synchronized (s) {
+                            if (s.round != null) retry(s, s.round);
                         }
+                        Voxyserver.LOGGER.warn("LOD0 delivery deferred: {}", e.toString());
                     }
-                    case 1 -> {
-                        preferIndex = !preferIndex;
-                        did = preferIndex ? hashOne(now) : source.step(server);
-                    }
-                    case 2 -> {
-                        Send send = ready.poll();
-                        if (send != null) {
-                            if (players.get(send.state.id) == send.state) sendNodes(send);
-                            did = true;
-                        }
-                    }
-                    case 3 -> did = preferIndex ? source.step(server) : hashOne(now);
-                    default -> did = notifyOne();
                 }
                 long elapsed = System.nanoTime() - began;
-                maxQuantumNanos = Math.max(maxQuantumNanos, elapsed);
-                heavyBudget.recordNanos(elapsed);
+                maxQuantum = Math.max(maxQuantum, elapsed);
+                workBudget.recordNanos(elapsed);
                 now = System.nanoTime();
-                idleTurns = did ? 0 : idleTurns + 1;
-                if (idleTurns >= 5) break;
-            }
-            if (now - lastLeaseSweep >= 5_000_000_000L) {
-                lastLeaseSweep = now;
-                expireLeases(now);
+                if (!did) break;
             }
             if (now - lastCheckpoint >= 30_000_000_000L) {
                 lastCheckpoint = now;
                 source.checkpoint();
+                engine.versions().save();
             }
-        } catch (Throwable error) {
-            Voxyserver.LOGGER.error("LOD maintenance cycle failed", error);
+        } catch (Throwable e) {
+            Voxyserver.LOGGER.error("version sync worker failed", e);
         } finally {
-            workerCycles++;
-            workerWallNanos += System.nanoTime() - cycleStarted;
-            if (cpuStarted > 0)
-                workerCpuNanos += Math.max(0, cpu.getCurrentThreadCpuTime() - cpuStarted);
+            cycles++;
+            workerNanos += System.nanoTime() - start;
         }
-    }
-
-    private boolean hashOne(long now) {
-        if (index.pending() == 0) return false;
-        return index.computeOne(
-                engine,
-                () ->
-                        hashBudget.tryAcquire(
-                                System.nanoTime() / 50_000_000L,
-                                config.hashWorkIntervalTicks,
-                                config.maxHashComputationsPerInterval,
-                                TimeUnit.MILLISECONDS.toNanos(config.maxHashMillisPerInterval)),
-                hashBudget::recordNanos);
-    }
-
-    private boolean notifyOne() {
-        if (notifying == null || !notifying.hasNext()) {
-            notifying = null;
-            var it = changed.keySet().iterator();
-            if (!it.hasNext()) return false;
-            notifyingGroup = it.next();
-            if (changed.remove(notifyingGroup) == null) return false;
-            var subscribers = subscriptions.get(notifyingGroup);
-            if (subscribers == null) return true;
-            notifying = subscribers.iterator();
-            if (!notifying.hasNext()) return true;
-        }
-        State state = players.get(notifying.next());
-        if (state != null)
-            synchronized (state) {
-                Gate gate = state.groups.get(notifyingGroup.key);
-                if (gate != null) invalidate(state, notifyingGroup.key, gate);
-            }
-        return true;
-    }
-
-    private void expireLeases(long now) {
-        for (State state : players.values())
-            synchronized (state) {
-                var it = state.groups.entrySet().iterator();
-                while (it.hasNext()) {
-                    var e = it.next();
-                    Gate gate = e.getValue();
-                    if (now < gate.expires) continue;
-                    supersede(state, e.getKey(), gate.wanted);
-                    unsubscribe(state, e.getKey());
-                    state.retired.put(e.getKey(), gate.request);
-                    it.remove();
-                }
-            }
     }
 
     public void onTick(MinecraftServer server) {
         if (closed) return;
         this.server = server;
         tick++;
-        if (!started) {
-            started = true;
+        if (!resumed) {
+            resumed = true;
             Map<String, ServerLevel> levels = new HashMap<>();
-            for (var level : server.getAllLevels())
-                levels.put(level.dimension().identifier().toString(), level);
+            for (var l : server.getAllLevels())
+                levels.put(l.dimension().identifier().toString(), l);
             worker.execute(() -> source.resume(levels));
         }
-        for (var entry : players.entrySet()) {
-            var state = entry.getValue();
-            var player = server.getPlayerList().getPlayer(entry.getKey());
-            if (player == null) continue;
-            BandwidthThrottler.INSTANCE.tick(state.id, tick);
-            synchronized (state) {
-                for (long batch : state.tracker.expiredDemandBatches(tick, 600)) {
-                    state.tracker.completeDemandBatch(
-                            state.tracker.streamEpoch(), batch, false, tick);
-                    Delivery old = state.deliveries.remove(batch);
-                    if (old == null) continue;
-                    Gate gate = state.groups.get(old.group);
-                    if (gate != null && gate.request == old.request) {
-                        gate.attempts++;
-                        gate.nextSend = System.nanoTime() + 5_000_000_000L;
-                        schedule(state, old.group, gate);
-                    }
+        for (State s : players.values()) {
+            var p = server.getPlayerList().getPlayer(s.id);
+            if (p == null) continue;
+            BandwidthThrottler.INSTANCE.tick(s.id, tick);
+            if (s.protocolOk && !engine.versions().namespace().equals(s.authority)) session(p, s);
+            synchronized (s) {
+                while (!s.controls.isEmpty())
+                    ServerPlayNetworking.send(p, s.controls.removeFirst());
+                Round r = s.round;
+                if (r != null && r.flight != null && r.flight.receipt.expire(tick, 600)) {
+                    ackTimeouts++;
+                    r.flight = null;
+                    retry(s, r);
                 }
-            }
-            var queue = BandwidthThrottler.INSTANCE.getQueue(state.id);
-            if (queue == null) continue;
-            synchronized (state) {
-                synchronized (queue) {
-                    synchronized (state.tracker) {
-                        int sent = 0,
-                                limit =
-                                        state.tracker.getEffectiveMaxSections(
-                                                config.maxSectionsPerTickPerPlayer);
-                        while (true) {
-                            var packet = queue.peekNext();
-                            if (packet == null) break;
-                            if (!packet.dimension().equals(player.level().dimension().identifier())
-                                    || !state.tracker.isBatchSendable(
-                                            packet.streamEpoch(), packet.batchId())) {
-                                queue.pollNext();
-                                failQueued(state, packet);
-                                continue;
-                            }
-                            if (sent + packet.payload().sectionCount() > limit) break;
-                            if (!BandwidthThrottler.INSTANCE.canSend(state.id, packet.byteSize()))
-                                break;
-                            queue.pollNext();
-                            ServerPlayNetworking.send(player, packet.payload());
-                            sentNodes += packet.payload().sectionCount();
-                            state.sentNodes += packet.payload().sectionCount();
-                            sent += packet.payload().sectionCount();
-                        }
-                    }
+                if (r != null
+                        && s.round == r
+                        && r.flight == null
+                        && System.nanoTime() - r.lastActivity > 600_000_000_000L) fail(s, r);
+                var q = BandwidthThrottler.INSTANCE.getQueue(s.id);
+                if (q == null) continue;
+                var packet = q.peekNext();
+                if (packet == null) continue;
+                if (r == null
+                        || r.flight == null
+                        || packet.batchId() != r.flight.id
+                        || packet.streamEpoch() != s.epoch
+                        || !packet.dimension().equals(p.level().dimension().identifier())) {
+                    q.pollNext();
+                    continue;
                 }
+                int limit =
+                        Math.min(
+                                16,
+                                Math.min(
+                                        config.sectionsPerPacket,
+                                        s.maxSections <= 0
+                                                ? config.maxSectionsPerTickPerPlayer
+                                                : Math.min(
+                                                        s.maxSections,
+                                                        config.maxSectionsPerTickPerPlayer)));
+                if (packet.payload().sectionCount() > limit) {
+                    q.pollNext();
+                    r.flight = null;
+                    r.retryAt = 0;
+                    wake.request();
+                    continue;
+                }
+                if (!BandwidthThrottler.INSTANCE.canSend(s.id, packet.byteSize())) continue;
+                q.pollNext();
+                ServerPlayNetworking.send(p, packet.payload());
+                r.flight.receipt.sent(tick);
+                sentNodes += packet.payload().sectionCount();
+                s.sent += packet.payload().sectionCount();
             }
         }
         if (config.debugTrackingEnabled && tick % config.debugTrackingInterval == 0) logSyncStats();
     }
 
-    private void closeState(State state) {
-        requests.remove(state.id);
-        synchronized (state) {
-            for (long group : new ArrayList<>(state.groups.keySet())) unsubscribe(state, group);
-            state.groups.clear();
-            state.deliveries.clear();
-            state.tracker.reset();
-        }
-        BandwidthThrottler.INSTANCE.clearPlayerQueue(state.id);
+    public void onDimensionChange(ServerPlayer p, ServerLevel destination) {
+        var s = players.get(p.getUUID());
+        if (s != null && s.protocolOk) session(p, s);
     }
 
-    private void newSession(ServerPlayer player, State state) {
-        synchronized (state) {
-            closeState(state);
-            state.retired.clear();
-            state.dimension = player.level().dimension().identifier();
-            var session = state.tracker.beginSession(state.dimension, false, tick + 60);
-            ServerPlayNetworking.send(
-                    player,
-                    new LODStreamSessionPayload(
-                            state.dimension,
-                            session.streamEpoch(),
-                            session.manifestRequestId(),
-                            false,
-                            engine.getWorldIdentity(),
-                            com.dripps.voxyserver.util.SemanticSectionHash.VERSION,
-                            new ManifestScope(
-                                    player.getBlockX() >> 5,
-                                    player.getBlockZ() >> 5,
-                                    state.tracker.getEffectiveRadius(config.maxClientVoxyRadius)
-                                            >> 1)));
+    public void clearDimensionForReadyPlayers(ServerLevel level) {
+        for (var s : players.values()) {
+            var p = level.getServer().getPlayerList().getPlayer(s.id);
+            if (p != null && p.level() == level && s.protocolOk) session(p, s);
         }
     }
 
-    private void sendSettings(ServerPlayer player) {
-        ServerPlayNetworking.send(player, new LODHashSyncSettingsPayload(config.hashSyncEnabled));
-        ServerPlayNetworking.send(
-                player,
-                new LODServerSettingsPayload(
-                        config.maxClientVoxyRadius, config.maxSectionsPerTickPerPlayer));
+    public void updateConfig(VoxyServerConfig cfg) {
+        var previous = config;
+        config = cfg;
+        source.dirty.updateTiming(
+                cfg.maintenanceQuietMillis * 1_000_000L,
+                cfg.maintenanceCooldownMillis * 1_000_000L,
+                cfg.maintenanceCooldownJitterMillis * 1_000_000L);
+        BandwidthThrottler.INSTANCE.updateAllBandwidth(cfg.maxBandwidthBytesPerSec);
+        if (server != null
+                && (cfg.maxClientVoxyRadius != previous.maxClientVoxyRadius
+                        || cfg.maxSectionsPerTickPerPlayer != previous.maxSectionsPerTickPerPlayer))
+            for (var s : players.values()) {
+                var p = server.getPlayerList().getPlayer(s.id);
+                if (p != null && s.protocolOk) settings(p);
+            }
     }
 
     public int pendingSourceSections() {
@@ -890,43 +815,12 @@ public final class LodStreamingService {
         return sentNodes;
     }
 
-    public void markSourceColumn(
-            ServerLevel level, net.minecraft.world.level.chunk.LevelChunk chunk) {
-        if (!closed) source.markColumn(level, chunk);
+    public void markSourceColumn(ServerLevel l, net.minecraft.world.level.chunk.LevelChunk c) {
+        if (!closed) source.markColumn(l, c, config.sourceColumnRecheckSeconds);
     }
 
-    public void markSourceDirty(ServerLevel level, int blockX, int blockY, int blockZ) {
-        if (!closed) source.mark(level, blockX, blockY, blockZ);
-    }
-
-    public void onDimensionChange(ServerPlayer player, ServerLevel destination) {
-        State state = players.get(player.getUUID());
-        if (state != null && state.tracker.isProtocolOk()) newSession(player, state);
-    }
-
-    public void clearDimensionForReadyPlayers(ServerLevel level) {
-        index.clear();
-        for (var state : players.values()) {
-            var player = level.getServer().getPlayerList().getPlayer(state.id);
-            if (player != null && player.level() == level && state.tracker.isProtocolOk())
-                newSession(player, state);
-        }
-    }
-
-    public void updateConfig(VoxyServerConfig cfg) {
-        config = cfg;
-        source.dirty.updateTiming(
-                cfg.maintenanceQuietMillis * 1_000_000L,
-                cfg.maintenanceCooldownMillis * 1_000_000L);
-        BandwidthThrottler.INSTANCE.updateAllBandwidth(cfg.maxBandwidthBytesPerSec);
-        if (server != null)
-            for (var state : players.values()) {
-                var p = server.getPlayerList().getPlayer(state.id);
-                if (p != null && state.tracker.isProtocolOk()) {
-                    sendSettings(p);
-                    newSession(p, state);
-                }
-            }
+    public void markSourceDirty(ServerLevel l, int x, int y, int z) {
+        if (!closed) source.mark(l, x, y, z);
     }
 
     public void shutdown() {
@@ -934,16 +828,12 @@ public final class LodStreamingService {
         closed = true;
         source.stopCaptures();
         if (server != null)
-            for (var player : server.getPlayerList().getPlayers()) {
+            for (var p : server.getPlayerList().getPlayers())
                 try {
-                    if (ServerPlayNetworking.canSend(player, LODProtocolPayload.TYPE))
-                        ServerPlayNetworking.send(player, new LODProtocolPayload(0));
-                } catch (RuntimeException failure) {
-                    // A disappearing connection must never prevent worker/storage shutdown.
-                    Voxyserver.LOGGER.warn(
-                            "Could not notify {} of disabled streaming", player.getUUID(), failure);
+                    if (ServerPlayNetworking.canSend(p, LODProtocolPayload.TYPE))
+                        ServerPlayNetworking.send(p, new LODProtocolPayload(0));
+                } catch (RuntimeException ignored) {
                 }
-            }
         worker.execute(source::checkpoint);
         worker.shutdown();
         boolean interrupted = false;
@@ -954,20 +844,12 @@ public final class LodStreamingService {
                 interrupted = true;
             }
         if (interrupted) Thread.currentThread().interrupt();
-        for (var state : players.values()) {
-            closeState(state);
-            BandwidthThrottler.INSTANCE.unregisterPlayer(state.id);
+        for (var s : players.values()) {
+            clear(s);
+            BandwidthThrottler.INSTANCE.unregisterPlayer(s.id);
         }
         players.clear();
-        requests.clear();
-        ready.clear();
-        subscriptions.clear();
-        changed.clear();
-        notifying = null;
-        notifyingGroup = null;
         source.release();
-        index.clear();
-        engine.setDirtySectionListener(null);
         server = null;
     }
 
@@ -976,97 +858,78 @@ public final class LodStreamingService {
     public record StreamingStats(
             int players,
             int trackedSections,
-            int hashCacheSize,
             int pendingDirty,
             int queuedDirty,
             int loadedChunks,
             List<PlayerStat> perPlayer) {}
 
-    public StreamingStats snapshotStats(MinecraftServer s) {
+    public StreamingStats snapshotStats(MinecraftServer server) {
         var stats = new ArrayList<PlayerStat>();
-        players.forEach(
-                (id, state) -> {
-                    var p = s.getPlayerList().getPlayer(id);
-                    stats.add(
-                            new PlayerStat(
-                                    p == null ? id.toString() : p.getName().getString(),
-                                    state.tracker.sentCount(),
-                                    p == null ? 0 : p.getBlockX() >> 4,
-                                    p == null ? 0 : p.getBlockZ() >> 4));
-                });
-        long loaded = 0;
-        for (var level : s.getAllLevels()) loaded += level.getChunkSource().getLoadedChunksCount();
+        int pending = 0;
+        for (var s : players.values()) {
+            var p = server.getPlayerList().getPlayer(s.id);
+            synchronized (s) {
+                if (s.round != null) pending++;
+                stats.add(
+                        new PlayerStat(
+                                p == null ? s.id.toString() : p.getName().getString(),
+                                (int) Math.min(Integer.MAX_VALUE, s.sent),
+                                p == null ? 0 : p.getBlockX() >> 4,
+                                p == null ? 0 : p.getBlockZ() >> 4));
+            }
+        }
+        int loaded = 0;
+        for (var l : server.getAllLevels()) loaded += l.getChunkSource().getLoadedChunksCount();
         return new StreamingStats(
                 players.size(),
-                index.size(),
-                index.size(),
+                engine.versions().nodeCount(),
                 source.dirty.dirtyCells(),
-                index.pending(),
-                (int) Math.min(Integer.MAX_VALUE, loaded),
+                pending,
+                loaded,
                 stats);
     }
 
     public void logSyncStats() {
         Voxyserver.LOGGER.info(
-                "demand sync: roots={} dirtyCells={} sourceUpdates={} sourceRetries={} indexed={}"
-                    + " hashWork={} cacheHits={} absent={} matchedGroups={} details={} sentNodes={}"
-                    + " rejected={}",
-                source.dirty.roots(),
+                "version sync: versionedNodes={} roots={} dirtyCells={} sourceUpdates={}"
+                    + " sourceRetries={} versionIncrements={} sentLod0={} completed={} failed={}"
+                    + " busyRejected={} ackTimeouts={} columnAudits={} skippedAudits={} cycles={}"
+                    + " workerMs={} maxQuantumMs={} mainCaptureMs={}",
+                engine.versions().nodeCount(),
+                engine.versions().rootCount(),
                 source.dirty.dirtyCells(),
                 source.updates,
                 source.retries,
-                index.size(),
-                index.hashesComputed,
-                index.cacheHits,
-                index.absent,
-                summaryMatches,
-                detailRequests,
+                engine.versions().increments(),
                 sentNodes,
-                requestsRejected);
-        Voxyserver.LOGGER.info(
-                "maintenance: cycles={} cpuMs={} wallMs={} maxQuantumMs={} captureCount={}"
-                        + " mainCaptureMs={} hashMs={}",
-                workerCycles,
-                workerCpuNanos / 1e6,
-                workerWallNanos / 1e6,
-                maxQuantumNanos / 1e6,
-                source.captureCount,
-                source.captureNanos / 1e6,
-                index.hashNanos / 1e6);
-        players.forEach(
-                (id, state) -> {
-                    var q = BandwidthThrottler.INSTANCE.getQueue(id);
-                    Voxyserver.LOGGER.info(
-                            "demand player {} ready={} protocolOk={} enabled={} requests={}"
-                                + " pendingReplies={} details={} sentNodes={} rateRejected={}"
-                                + " rangeRejected={} queueRejected={} {} queue={}",
-                            id,
-                            state.tracker.isReady(),
-                            state.tracker.isProtocolOk(),
-                            state.tracker.isLodEnabled(),
-                            state.requestsSeen,
-                            state.sourcePendingReplies,
-                            state.detailReplies,
-                            state.sentNodes,
-                            state.rateRejected,
-                            state.rangeRejected,
-                            state.queueRejected,
-                            state.tracker.syncStats(),
-                            q == null ? null : q.stats());
-                });
-    }
-
-    // Only the retained v4 tracker regression fixtures use this encoding. Protocol 5 uses native
-    // keys per dimension.
-    static long composeSectionKey(int dimension, long key) {
-        return key | ((long) (dimension & 15) << 60);
-    }
-
-    static long extractSectionKey(long key) {
-        return key & 0x0fffffffffffffffL;
-    }
-
-    static int extractSectionDimOrdinal(long key) {
-        return (int) (key >>> 60) & 15;
+                roundsCompleted,
+                roundsFailed,
+                busyRejected,
+                ackTimeouts,
+                source.columns.scheduled(),
+                source.columns.skipped(),
+                cycles,
+                workerNanos / 1e6,
+                maxQuantum / 1e6,
+                source.captureNanos / 1e6);
+        for (var s : players.values())
+            synchronized (s) {
+                var q = BandwidthThrottler.INSTANCE.getQueue(s.id);
+                Voxyserver.LOGGER.info(
+                        "version player {} ready={} protocolOk={} enabled={} requests={}"
+                                + " sentLod0={} failedBatches={} retries={} scopeRejected={}"
+                                + " activeRound={} queue={}",
+                        s.id,
+                        s.ready,
+                        s.protocolOk,
+                        s.enabled,
+                        s.requests,
+                        s.sent,
+                        s.failedBatches,
+                        s.retries,
+                        s.scopeRejected,
+                        s.round == null ? 0 : s.round.id,
+                        q == null ? null : q.stats());
+            }
     }
 }

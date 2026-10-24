@@ -5,16 +5,19 @@ import com.dripps.voxyserver.client.service.RemoteIngestService;
 import com.dripps.voxyserver.network.LODBatchResultPayload;
 import com.dripps.voxyserver.network.LODClearPayload;
 import com.dripps.voxyserver.network.LODHandshakePayload;
-import com.dripps.voxyserver.network.LODDemandReplyPayload;
-import com.dripps.voxyserver.network.LODHashSyncSettingsPayload;
 import com.dripps.voxyserver.network.LODProtocolPayload;
 import com.dripps.voxyserver.network.LODServerSettingsPayload;
-import com.dripps.voxyserver.network.LODStreamSessionPayload;
 import com.dripps.voxyserver.network.PreSerializedLodPayload;
+import com.dripps.voxyserver.network.VersionScopePayload;
+import com.dripps.voxyserver.network.VersionSessionPayload;
+import com.dripps.voxyserver.network.VersionStatusPayload;
+import com.dripps.voxyserver.network.VersionTablePayload;
 import com.dripps.voxyserver.network.VoxyServerNetworking;
+
 import me.cortex.voxy.commonImpl.VoxyCommon;
 import me.cortex.voxy.commonImpl.VoxyInstance;
 import me.cortex.voxy.commonImpl.WorldIdentifier;
+
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
@@ -38,7 +41,6 @@ public final class ClientLodReceiver {
     private static final AtomicLong connectionGeneration = new AtomicLong();
     private static int reservedBatches;
     private static long reservedBytes;
-    private static volatile long networkManifestRequest;
     private static volatile long networkEpoch;
     private static volatile Identifier networkDimension;
 
@@ -56,92 +58,127 @@ public final class ClientLodReceiver {
     public static void register() {
         ClientTickEvents.END_CLIENT_TICK.register(client -> ClientLodSettings.onClientTick());
 
-        ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
-            connectionGeneration.incrementAndGet();
-            networkEpoch = 0L;
-            networkDimension = null;
-            clearQueuedInbound(false);
-            ClientLodSettings.prepareForCurrentConnection();
-            if (ClientPlayNetworking.canSend(LODHandshakePayload.TYPE)) {
-                ClientLodSettings.sendHandshake();
-            }
-        });
-
-        ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
-            connectionGeneration.incrementAndGet();
-            networkEpoch = 0L;
-            networkDimension = null;
-            clearQueuedInbound(false);
-            ClientLodSettings.reset();
-            setIngestSession(null, 0L);
-            ClientLodHashStore.get().flush();
-        });
-
-        ClientPlayNetworking.registerGlobalReceiver(LODProtocolPayload.TYPE, (payload, context) ->
-                context.client().execute(() -> {
-                    int serverProtocol = payload.protocol();
-                    int clientProtocol = VoxyServerNetworking.PROTOCOL_VERSION;
-                if (serverProtocol == clientProtocol) {
-                    ClientLodSettings.applyProtocol(serverProtocol);
-                } else {
-                    ClientLodSettings.applyProtocol(serverProtocol);
-                    disableRemoteIngest();
-                        if (serverProtocol > 0 && serverProtocol < clientProtocol) tellPlayer(serverOutOfDateMessage());
+        ClientPlayConnectionEvents.JOIN.register(
+                (handler, sender, client) -> {
+                    connectionGeneration.incrementAndGet();
+                    networkEpoch = 0L;
+                    networkDimension = null;
+                    clearQueuedInbound(false);
+                    ClientLodSettings.prepareForCurrentConnection();
+                    if (ClientPlayNetworking.canSend(LODHandshakePayload.TYPE)) {
+                        ClientLodSettings.sendHandshake();
                     }
-                }));
+                });
 
-        ClientPlayNetworking.registerGlobalReceiver(LODServerSettingsPayload.TYPE, (payload, context) ->
-                context.client().execute(() -> ClientLodSettings.applyServerSettings(
-                        payload.maxLodStreamRadius(), payload.maxSectionsPerTick())));
+        ClientPlayConnectionEvents.DISCONNECT.register(
+                (handler, client) -> {
+                    connectionGeneration.incrementAndGet();
+                    networkEpoch = 0L;
+                    networkDimension = null;
+                    clearQueuedInbound(false);
+                    ClientLodSettings.reset();
+                    setIngestSession(null, 0L);
+                });
 
-        ClientPlayNetworking.registerGlobalReceiver(LODHashSyncSettingsPayload.TYPE, (payload, context) ->
-                context.client().execute(() -> ClientLodSettings.applyHashSyncSettings(payload.enabled())));
+        ClientPlayNetworking.registerGlobalReceiver(
+                LODProtocolPayload.TYPE,
+                (payload, context) ->
+                        context.client()
+                                .execute(
+                                        () -> {
+                                            int serverProtocol = payload.protocol();
+                                            int clientProtocol =
+                                                    VoxyServerNetworking.PROTOCOL_VERSION;
+                                            if (serverProtocol == clientProtocol) {
+                                                ClientLodSettings.applyProtocol(serverProtocol);
+                                            } else {
+                                                ClientLodSettings.applyProtocol(serverProtocol);
+                                                disableRemoteIngest();
+                                                if (serverProtocol > 0
+                                                        && serverProtocol < clientProtocol)
+                                                    tellPlayer(serverOutOfDateMessage());
+                                            }
+                                        }));
 
-        ClientPlayNetworking.registerGlobalReceiver(LODStreamSessionPayload.TYPE, (payload, context) -> {
-            if (networkEpoch == payload.streamEpoch() && payload.manifestRequestId() < networkManifestRequest) return;
-            networkManifestRequest = payload.manifestRequestId();
-            boolean changed = networkEpoch != payload.streamEpoch()
-                    || !Objects.equals(networkDimension, payload.dimension());
-            networkEpoch = payload.streamEpoch();
-            networkDimension = payload.dimension();
-            context.client().execute(() -> {
-                if (networkEpoch != payload.streamEpoch() || networkManifestRequest != payload.manifestRequestId()
-                        || !Objects.equals(networkDimension, payload.dimension())) return;
-                clearStaleQueuedInbound(payload.streamEpoch());
-                if (changed) setIngestSession(payload.dimension(), payload.streamEpoch());
-                ClientLodSettings.applyStreamSession(payload);
-            });
-        });
+        ClientPlayNetworking.registerGlobalReceiver(
+                LODServerSettingsPayload.TYPE,
+                (payload, context) ->
+                        context.client()
+                                .execute(
+                                        () ->
+                                                ClientLodSettings.applyServerSettings(
+                                                        payload.maxLodStreamRadius(),
+                                                        payload.maxSectionsPerTick())));
 
-        ClientPlayNetworking.registerGlobalReceiver(PreSerializedLodPayload.TYPE, (payload, context) -> {
-            if (!ClientLodSettings.isProtocolOk()
-                    || payload.streamEpoch() != networkEpoch
-                    || networkDimension == null) {
-                sendResult(context.client(), new LODBatchResultPayload(
-                        payload.streamEpoch(), payload.batchId(), LODBatchResultPayload.STALE),
-                        connectionGeneration.get());
-                return;
-            }
-            long generation = connectionGeneration.get();
-            Inbound inbound = new Inbound(payload, generation);
-            if (!reserveInbound(inbound)) {
-                sendResult(context.client(), new LODBatchResultPayload(
-                        payload.streamEpoch(), payload.batchId(), LODBatchResultPayload.OVERFLOW), generation);
-                return;
-            }
-            scheduleDrain(context.client());
-        });
+        ClientPlayNetworking.registerGlobalReceiver(
+                VersionSessionPayload.TYPE,
+                (payload, context) -> {
+                    boolean changed =
+                            networkEpoch != payload.epoch()
+                                    || !Objects.equals(networkDimension, payload.dimension());
+                    networkEpoch = payload.epoch();
+                    networkDimension = payload.dimension();
+                    context.client()
+                            .execute(
+                                    () -> {
+                                        if (networkEpoch != payload.epoch()
+                                                || !Objects.equals(
+                                                        networkDimension, payload.dimension()))
+                                            return;
+                                        clearStaleQueuedInbound(payload.epoch());
+                                        if (changed)
+                                            setIngestSession(payload.dimension(), payload.epoch());
+                                        ClientLodSettings.applyStreamSession(payload);
+                                    });
+                });
 
-        ClientPlayNetworking.registerGlobalReceiver(LODDemandReplyPayload.TYPE, (payload, context) -> ClientDemand.receive(payload));
+        ClientPlayNetworking.registerGlobalReceiver(
+                PreSerializedLodPayload.TYPE,
+                (payload, context) -> {
+                    if (!ClientLodSettings.isProtocolOk()
+                            || payload.streamEpoch() != networkEpoch
+                            || networkDimension == null) {
+                        sendResult(
+                                context.client(),
+                                new LODBatchResultPayload(
+                                        payload.streamEpoch(),
+                                        payload.batchId(),
+                                        LODBatchResultPayload.STALE),
+                                connectionGeneration.get());
+                        return;
+                    }
+                    long generation = connectionGeneration.get();
+                    Inbound inbound = new Inbound(payload, generation);
+                    if (!reserveInbound(inbound)) {
+                        sendResult(
+                                context.client(),
+                                new LODBatchResultPayload(
+                                        payload.streamEpoch(),
+                                        payload.batchId(),
+                                        LODBatchResultPayload.OVERFLOW),
+                                generation);
+                        return;
+                    }
+                    scheduleDrain(context.client());
+                });
 
-        ClientPlayNetworking.registerGlobalReceiver(LODClearPayload.TYPE, (payload, context) ->
-                context.client().execute(() -> handleClear(payload)));
+        ClientPlayNetworking.registerGlobalReceiver(
+                VersionScopePayload.TYPE, (payload, context) -> ClientDemand.receive(payload));
+        ClientPlayNetworking.registerGlobalReceiver(
+                VersionTablePayload.TYPE, (payload, context) -> ClientDemand.receive(payload));
+        ClientPlayNetworking.registerGlobalReceiver(
+                VersionStatusPayload.TYPE, (payload, context) -> ClientDemand.receive(payload));
+
+        ClientPlayNetworking.registerGlobalReceiver(
+                LODClearPayload.TYPE,
+                (payload, context) -> context.client().execute(() -> handleClear(payload)));
     }
 
     private static boolean reserveInbound(Inbound inbound) {
         synchronized (inboundLock) {
             int bytes = inbound.payload.data().length;
-            if (reservedBatches >= MAX_INBOUND_BATCHES || reservedBytes + bytes > MAX_INBOUND_BYTES) {
+            if (reservedBatches >= MAX_INBOUND_BATCHES
+                    || reservedBytes + bytes > MAX_INBOUND_BYTES) {
                 return false;
             }
             reservedBatches++;
@@ -181,42 +218,63 @@ public final class ClientLodReceiver {
         if (inbound.connectionGeneration != connectionGeneration.get()
                 || inbound.payload.streamEpoch() != networkEpoch
                 || !Objects.equals(dimension, networkDimension)) {
-            completeInbound(client, inbound, new LODBatchResultPayload(
-                    inbound.payload.streamEpoch(), inbound.payload.batchId(), LODBatchResultPayload.STALE));
+            completeInbound(
+                    client,
+                    inbound,
+                    new LODBatchResultPayload(
+                            inbound.payload.streamEpoch(),
+                            inbound.payload.batchId(),
+                            LODBatchResultPayload.STALE));
             return;
         }
 
         VoxyInstance instance = VoxyCommon.getInstance();
         WorldIdentifier worldId = level == null ? null : WorldIdentifier.of(level);
         if (instance == null || worldId == null) {
-            completeInbound(client, inbound, new LODBatchResultPayload(
-                    inbound.payload.streamEpoch(), inbound.payload.batchId(), LODBatchResultPayload.FAILURE));
+            completeInbound(
+                    client,
+                    inbound,
+                    new LODBatchResultPayload(
+                            inbound.payload.streamEpoch(),
+                            inbound.payload.batchId(),
+                            LODBatchResultPayload.FAILURE));
             return;
         }
 
         RemoteIngestService service =
                 ((IVoxyServerIngestAccess) instance).voxyserver$getRemoteIngestService();
         if (service == null || !service.isLive()) {
-            completeInbound(client, inbound, new LODBatchResultPayload(
-                    inbound.payload.streamEpoch(), inbound.payload.batchId(), LODBatchResultPayload.FAILURE));
+            completeInbound(
+                    client,
+                    inbound,
+                    new LODBatchResultPayload(
+                            inbound.payload.streamEpoch(),
+                            inbound.payload.batchId(),
+                            LODBatchResultPayload.FAILURE));
             return;
         }
 
         service.startSession(dimension, inbound.payload.streamEpoch());
-        boolean accepted = service.enqueueIngest(
-                worldId,
-                dimension,
-                inbound.payload,
-                level.registryAccess(),
-                result -> completeInbound(client, inbound, result)
-        );
+        boolean accepted =
+                service.enqueueIngest(
+                        worldId,
+                        dimension,
+                        inbound.payload,
+                        level.registryAccess(),
+                        result -> completeInbound(client, inbound, result));
         if (!accepted) {
-            completeInbound(client, inbound, new LODBatchResultPayload(
-                    inbound.payload.streamEpoch(), inbound.payload.batchId(), LODBatchResultPayload.OVERFLOW));
+            completeInbound(
+                    client,
+                    inbound,
+                    new LODBatchResultPayload(
+                            inbound.payload.streamEpoch(),
+                            inbound.payload.batchId(),
+                            LODBatchResultPayload.OVERFLOW));
         }
     }
 
-    private static void completeInbound(Minecraft client, Inbound inbound, LODBatchResultPayload result) {
+    private static void completeInbound(
+            Minecraft client, Inbound inbound, LODBatchResultPayload result) {
         releaseInbound(inbound);
         sendResult(client, result, inbound.connectionGeneration);
     }
@@ -239,8 +297,12 @@ public final class ClientLodReceiver {
             if (inbound == null) return;
             releaseInbound(inbound);
             if (sendStale) {
-                sendResult(client, new LODBatchResultPayload(
-                        inbound.payload.streamEpoch(), inbound.payload.batchId(), LODBatchResultPayload.STALE),
+                sendResult(
+                        client,
+                        new LODBatchResultPayload(
+                                inbound.payload.streamEpoch(),
+                                inbound.payload.batchId(),
+                                LODBatchResultPayload.STALE),
                         inbound.connectionGeneration);
             }
         }
@@ -261,19 +323,26 @@ public final class ClientLodReceiver {
         }
         for (Inbound inbound : stale) {
             releaseInbound(inbound);
-            sendResult(client, new LODBatchResultPayload(
-                    inbound.payload.streamEpoch(), inbound.payload.batchId(), LODBatchResultPayload.STALE),
+            sendResult(
+                    client,
+                    new LODBatchResultPayload(
+                            inbound.payload.streamEpoch(),
+                            inbound.payload.batchId(),
+                            LODBatchResultPayload.STALE),
                     inbound.connectionGeneration);
         }
     }
 
-    private static void sendResult(Minecraft client, LODBatchResultPayload result, long generation) {
-        client.execute(() -> {
-            if (generation != connectionGeneration.get() || client.getConnection() == null) return;
-            if (ClientPlayNetworking.canSend(LODBatchResultPayload.TYPE)) {
-                ClientPlayNetworking.send(result);
-            }
-        });
+    private static void sendResult(
+            Minecraft client, LODBatchResultPayload result, long generation) {
+        client.execute(
+                () -> {
+                    if (generation != connectionGeneration.get() || client.getConnection() == null)
+                        return;
+                    if (ClientPlayNetworking.canSend(LODBatchResultPayload.TYPE)) {
+                        ClientPlayNetworking.send(result);
+                    }
+                });
     }
 
     static void disableRemoteIngest() {
@@ -286,7 +355,8 @@ public final class ClientLodReceiver {
     private static void setIngestSession(Identifier dimension, long epoch) {
         VoxyInstance instance = VoxyCommon.getInstance();
         if (instance == null) return;
-        RemoteIngestService service = ((IVoxyServerIngestAccess) instance).voxyserver$getRemoteIngestService();
+        RemoteIngestService service =
+                ((IVoxyServerIngestAccess) instance).voxyserver$getRemoteIngestService();
         if (service != null) service.startSession(dimension, epoch);
     }
 
@@ -298,13 +368,18 @@ public final class ClientLodReceiver {
     }
 
     private static Component serverOutOfDateMessage() {
-        return Component.literal("[VoxyServer] ").withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD)
-                .append(Component.literal("this server's VoxyServer is out of date. LODs disabled, ask the admin to update.")
-                        .withStyle(ChatFormatting.RED));
+        return Component.literal("[VoxyServer] ")
+                .withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD)
+                .append(
+                        Component.literal(
+                                        "this server's VoxyServer is out of date. LODs disabled,"
+                                            + " ask the admin to update.")
+                                .withStyle(ChatFormatting.RED));
     }
 
     private static void handleClear(LODClearPayload payload) {
-        if (payload.dimension().isPresent() && !Objects.equals(payload.dimension().get(), networkDimension)) return;
+        if (payload.dimension().isPresent()
+                && !Objects.equals(payload.dimension().get(), networkDimension)) return;
         // A legacy clear signal invalidates verification and in-flight work only.
         // Server absence must never erase locally acquired Voxy terrain.
         clearQueuedInbound(true);

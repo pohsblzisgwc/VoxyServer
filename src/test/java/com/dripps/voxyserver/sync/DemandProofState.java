@@ -19,6 +19,11 @@ public class DemandProofState {
         this.wanted = wanted;
     }
 
+    /** No published snapshot exists while hashes is null. Unrequested siblings are independent. */
+    public boolean affectedBy(long changedSlots) {
+        return hashes != null && (wanted & changedSlots) != 0;
+    }
+
     public int summary(
             long present,
             long version,

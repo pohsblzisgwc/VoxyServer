@@ -14,14 +14,9 @@ public final class ClientLodSettings {
     private static int serverMaxRadius = -1, serverMaxSections = -1, lastReportedRadius = -1;
     private static final com.dripps.voxyserver.sync.ProtocolActivation activation =
             new com.dripps.voxyserver.sync.ProtocolActivation();
-    private static volatile String cacheNamespace = "unbound";
     private static String activeServerKey;
     private static ClientLodConfig.Preferences activePreferences =
             CONFIG.getPreferencesForServer(null);
-
-    public static String hashStoreKey(String worldId) {
-        return cacheNamespace + "_" + worldId;
-    }
 
     public static void prepareForCurrentConnection() {
         serverMaxRadius = -1;
@@ -57,10 +52,7 @@ public final class ClientLodSettings {
         sendPreferences();
     }
 
-    public static void applyHashSyncSettings(boolean enabled) {}
-
-    public static void applyStreamSession(LODStreamSessionPayload p) {
-        cacheNamespace = p.worldIdentity() + "_semantic" + p.hashVersion();
+    public static void applyStreamSession(VersionSessionPayload p) {
         ClientDemand.start(p);
     }
 

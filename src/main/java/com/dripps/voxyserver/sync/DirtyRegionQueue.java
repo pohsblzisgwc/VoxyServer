@@ -27,7 +27,7 @@ public final class DirtyRegionQueue<D> {
     private final AtomicInteger count = new AtomicInteger();
     private final com.dripps.voxyserver.util.BoundedLruCache<Work<D>, Long> cooldowns =
             new com.dripps.voxyserver.util.BoundedLruCache<>(65_536);
-    private volatile long quietNanos, cooldownNanos;
+    private volatile long quietNanos, cooldownNanos, cooldownJitterNanos;
     private final long baseMaxWaitNanos;
     private volatile long maxWaitNanos;
 
@@ -38,6 +38,12 @@ public final class DirtyRegionQueue<D> {
         this.baseMaxWaitNanos = maxWaitNanos;
         this.maxWaitNanos = Math.max(maxWaitNanos, quietNanos);
         this.cooldownNanos = cooldownNanos;
+    }
+
+    public void updateTiming(long quiet, long cooldown, long jitter) {
+        if (jitter < 0) throw new IllegalArgumentException("negative cooldown jitter");
+        cooldownJitterNanos = jitter;
+        updateTiming(quiet, cooldown);
     }
 
     public void updateTiming(long quiet, long cooldown) {
@@ -164,7 +170,12 @@ public final class DirtyRegionQueue<D> {
                         count.addAndGet(-Integer.bitCount(mask));
                     }
                     if (mask == 0) continue;
-                    cooldowns.put(cooldownKey, now + cooldownNanos);
+                    long jitter =
+                            cooldownJitterNanos == 0
+                                    ? 0
+                                    : java.util.concurrent.ThreadLocalRandom.current()
+                                            .nextLong(cooldownJitterNanos + 1);
+                    cooldowns.put(cooldownKey, now + cooldownNanos + jitter);
                     return new Work<>(root.dimension, node, mask);
                 }
             }
@@ -212,7 +223,9 @@ public final class DirtyRegionQueue<D> {
     }
 
     public void restore(D dimension, long root, long[] words, long now) {
-        if (words.length > 512 || !DemandGroup.valid(root) || WorldEngine.getLevel(root) != 4)
+        if (words.length > 512
+                || ((root & 15) != 0 || WorldEngine.getLevel(root) > 4)
+                || WorldEngine.getLevel(root) != 4)
             throw new IllegalArgumentException("invalid dirty bitmap");
         Root<D> key = new Root<>(dimension, root);
         while (true) {

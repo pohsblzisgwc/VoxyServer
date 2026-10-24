@@ -17,7 +17,6 @@ import net.minecraft.core.*;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.*;
 import net.minecraft.server.Bootstrap;
-import net.minecraft.server.level.TicketType;
 import net.minecraft.world.level.biome.*;
 import net.minecraft.world.level.block.Blocks;
 
@@ -37,41 +36,6 @@ public final class NativeLodIntegrationTest {
         if (net.fabricmc.loader.api.FabricLoader.getInstance().getEnvironmentType()
                 == net.fabricmc.api.EnvType.SERVER)
             com.dripps.voxyserver.server.NativeRuntimeLifecycleTest.run();
-        com.dripps.voxyserver.server.background.BackgroundChunkGeneration.registerTicketType();
-        var backgroundTicket =
-                com.dripps.voxyserver.server.background.BackgroundChunkGeneration.ticketType();
-        require(
-                backgroundTicket.doesLoad()
-                        && !backgroundTicket.doesSimulate()
-                        && !backgroundTicket.persist()
-                        && !backgroundTicket.canExpireIfUnloaded()
-                        && backgroundTicket.timeout() > 0,
-                "background generation ticket can persist, tick entities, or expire before"
-                        + " loading");
-        require(
-                !backgroundTicket.equals(TicketType.PLAYER_LOADING),
-                "background ticket aliases player loading");
-        var ticketStore = new net.minecraft.world.level.TicketStorage();
-        var position = new net.minecraft.world.level.ChunkPos(1, 2);
-        ticketStore.addTicketWithRadius(backgroundTicket, position, 0);
-        ticketStore.addTicketWithRadius(TicketType.PLAYER_LOADING, position, 0);
-        var owned =
-                ticketStore.getTickets(position.pack()).stream()
-                        .filter(t -> t.getType() == backgroundTicket)
-                        .findFirst()
-                        .orElseThrow();
-        for (int i = 0; i < backgroundTicket.timeout() + 1; i++) owned.decreaseTicksLeft();
-        require(owned.isTimedOut(), "native ticket expiry test not reached");
-        ticketStore.addTicketWithRadius(backgroundTicket, position, 0);
-        require(
-                !owned.isTimedOut() && ticketStore.getTickets(position.pack()).size() == 2,
-                "native refresh duplicated or failed to renew ticket");
-        ticketStore.removeTicketWithRadius(backgroundTicket, position, 0);
-        require(
-                ticketStore.getTickets(position.pack()).size() == 1
-                        && ticketStore.getTickets(position.pack()).getFirst().getType()
-                                == TicketType.PLAYER_LOADING,
-                "release removed player ticket");
         // Loading, rather than reading bytecode signatures, checks every required server mixin's
         // targets.
         for (String name :
@@ -85,6 +49,7 @@ public final class NativeLodIntegrationTest {
         var registry = biomes();
         snapshotLockSwitch(registry);
         NativeHierarchyTest.run();
+        NativeVersionSyncTest.run();
         var server = new WorldEngine(new MemoryStorage());
         var client = new WorldEngine(new MemoryStorage());
         configure(server);
@@ -129,11 +94,12 @@ public final class NativeLodIntegrationTest {
                 source.release();
             }
             var raw =
-                    PreSerializedLodPayload.fromBulk(
+                    LegacyNodeWire.fromBulk(
                                     new LODBulkPayload(DIM, List.of(payload)), RegistryAccess.EMPTY)
                             .withDemand(DemandGroup.of(coarse), 1)
                             .withDelivery(7, 1);
-            var decoded = raw.decodeBulk(RegistryAccess.EMPTY).sections().getFirst();
+            var decoded =
+                    LegacyNodeWire.decodeBulk(raw, RegistryAccess.EMPTY).sections().getFirst();
             require(
                     decoded.sectionKey() == coarse
                             && decoded.childMask() == 2
@@ -314,7 +280,7 @@ public final class NativeLodIntegrationTest {
                 });
     }
 
-    private static MappedRegistry<Biome> biomes() {
+    static MappedRegistry<Biome> biomes() {
         var registry = new MappedRegistry<Biome>(Registries.BIOME, Lifecycle.stable());
         var biome =
                 new Biome.BiomeBuilder()

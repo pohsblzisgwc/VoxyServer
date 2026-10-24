@@ -28,6 +28,8 @@ final class SourceMaintenance {
     private final ServerLodEngine engine;
     private final Path journal;
     private final Runnable wake;
+    final com.dripps.voxyserver.sync.SourceColumnRefresh<ServerLevel> columns =
+            new com.dripps.voxyserver.sync.SourceColumnRefresh<>();
 
     private record Root(ServerLevel level, long key) {}
 
@@ -74,15 +76,23 @@ final class SourceMaintenance {
         dirty.mark(level, x, y, z, System.nanoTime());
     }
 
-    void markColumn(ServerLevel level, LevelChunk chunk) {
+    void markColumn(ServerLevel level, LevelChunk chunk, int recheckSeconds) {
         if (stopped) return;
+        if (!columns.admit(
+                level,
+                chunk.getPos().x(),
+                chunk.getPos().z(),
+                System.nanoTime(),
+                TimeUnit.SECONDS.toNanos(recheckSeconds))) return;
         var heightmap = net.minecraft.world.level.levelgen.Heightmap.Types.WORLD_SURFACE;
         // getHeight would prime a missing heightmap by scanning terrain on the caller thread.
         int surface =
                 chunk.hasPrimedHeightmap(heightmap)
                         ? chunk.getHeight(heightmap, 8, 8)
                         : level.getSeaLevel();
-        for (int y = chunk.getMinSectionY(); y < chunk.getMaxSectionY(); y++) {
+        for (int y = chunk.getMinSectionY();
+                y < chunk.getMinSectionY() + chunk.getSections().length;
+                y++) {
             long root =
                     WorldEngine.getWorldSectionId(
                             4, chunk.getPos().x() >> 5, y >> 5, chunk.getPos().z() >> 5);
@@ -140,7 +150,6 @@ final class SourceMaintenance {
                 cursor = 0;
             }
             if (cursor < pieces.size()) {
-                Piece p = pieces.get(cursor++);
                 ServerLevel level = active.dimension();
                 WorldEngine world =
                         engine.getOrCreate(
@@ -148,56 +157,70 @@ final class SourceMaintenance {
                 if (world == null) throw new IllegalStateException("LOD world unavailable");
                 world.acquireRef();
                 try {
-                    PalettedContainerFactory palettes =
-                            PalettedContainerFactory.create(level.registryAccess());
-                    LevelChunkSection copy = p.source == null ? null : snapshotSection(p.source);
-                    var blocks =
-                            copy != null
-                                    ? copy.getStates()
-                                    : p.stored.getCompound("block_states").isPresent()
-                                            ? palettes.blockStatesContainerCodec()
-                                                    .parse(
-                                                            NbtOps.INSTANCE,
-                                                            p.stored
-                                                                    .getCompound("block_states")
-                                                                    .orElseThrow())
-                                                    .getOrThrow()
-                                            : palettes.createForBlockStates();
-                    // The block and biome palettes are copied together when source is live.
-                    var biomes =
-                            copy != null
-                                    ? copy.getBiomes()
-                                    : p.stored.getCompound("biomes").isPresent()
-                                            ? palettes.biomeContainerCodec()
-                                                    .parse(
-                                                            NbtOps.INSTANCE,
-                                                            p.stored
-                                                                    .getCompound("biomes")
-                                                                    .orElseThrow())
-                                                    .getOrThrow()
-                                            : palettes.createForBiomes();
-                    DataLayer bl = p.block, sl = p.sky;
-                    if (p.stored != null) {
-                        bl = light(p.stored, "BlockLight");
-                        sl = light(p.stored, "SkyLight");
+                    var prepared = new ArrayList<VoxelizedSection>();
+                    while (cursor < pieces.size()) {
+                        Piece p = pieces.get(cursor++);
+                        PalettedContainerFactory palettes =
+                                PalettedContainerFactory.create(level.registryAccess());
+                        LevelChunkSection copy =
+                                p.source == null ? null : snapshotSection(p.source);
+                        var blocks =
+                                copy != null
+                                        ? copy.getStates()
+                                        : p.stored.getCompound("block_states").isPresent()
+                                                ? palettes.blockStatesContainerCodec()
+                                                        .parse(
+                                                                NbtOps.INSTANCE,
+                                                                p.stored
+                                                                        .getCompound("block_states")
+                                                                        .orElseThrow())
+                                                        .getOrThrow()
+                                                : palettes.createForBlockStates();
+                        // The block and biome palettes are copied together when source is live.
+                        var biomes =
+                                copy != null
+                                        ? copy.getBiomes()
+                                        : p.stored.getCompound("biomes").isPresent()
+                                                ? palettes.biomeContainerCodec()
+                                                        .parse(
+                                                                NbtOps.INSTANCE,
+                                                                p.stored
+                                                                        .getCompound("biomes")
+                                                                        .orElseThrow())
+                                                        .getOrThrow()
+                                                : palettes.createForBiomes();
+                        DataLayer bl = p.block, sl = p.sky;
+                        if (p.stored != null) {
+                            bl = light(p.stored, "BlockLight");
+                            sl = light(p.stored, "SkyLight");
+                        }
+                        final DataLayer block = bl, sky = sl;
+                        var vox =
+                                WorldConversionFactory.convert(
+                                        VoxelizedSection.createEmpty().setPosition(p.x, p.y, p.z),
+                                        world.getMapper(),
+                                        blocks,
+                                        biomes,
+                                        (x, y, z) ->
+                                                (byte)
+                                                        ((sky == null ? 0 : sky.get(x, y, z))
+                                                                | ((block == null
+                                                                                ? 0
+                                                                                : block.get(
+                                                                                        x, y, z))
+                                                                        << 4)));
+                        WorldVoxilizedSectionMipper.mipSection(vox, world.getMapper());
+                        prepared.add(vox);
                     }
-                    final DataLayer block = bl, sky = sl;
-                    var vox =
-                            WorldConversionFactory.convert(
-                                    VoxelizedSection.createEmpty().setPosition(p.x, p.y, p.z),
-                                    world.getMapper(),
-                                    blocks,
-                                    biomes,
-                                    (x, y, z) ->
-                                            (byte)
-                                                    ((sky == null ? 0 : sky.get(x, y, z))
-                                                            | ((block == null
-                                                                            ? 0
-                                                                            : block.get(x, y, z))
-                                                                    << 4)));
-                    WorldVoxilizedSectionMipper.mipSection(vox, world.getMapper());
-                    WorldUpdater.insertUpdate(world, vox);
-                    updates++;
+                    synchronized (world) {
+                        engine.versions().beginBatch();
+                        try {
+                            for (var vox : prepared) WorldUpdater.insertUpdate(world, vox);
+                        } finally {
+                            engine.versions().endBatch();
+                        }
+                    }
+                    updates += prepared.size();
                 } finally {
                     world.releaseRef();
                 }
@@ -255,6 +278,17 @@ final class SourceMaintenance {
                             var pos = SectionPos.of(x, y, z);
                             var block = bl.getDataLayerData(pos);
                             var sky = sl.getDataLayerData(pos);
+                            if (sky == null && !chunk.getSections()[index].hasOnlyAir()) {
+                                final int sourceY = y;
+                                sky =
+                                        com.dripps.voxyserver.sync.SkyLightSnapshot.inherited(
+                                                (lx, lz) ->
+                                                        sl.getLightValue(
+                                                                new net.minecraft.core.BlockPos(
+                                                                        (x << 4) + lx,
+                                                                        sourceY << 4,
+                                                                        (z << 4) + lz)));
+                            }
                             list.add(
                                     new Piece(
                                             chunk.getSections()[index],
@@ -347,6 +381,7 @@ final class SourceMaintenance {
         if (snapshot != null) snapshot.cancel(false);
         clearActive();
         dirty.clear();
+        columns.clear();
         surfaces.clear();
     }
 

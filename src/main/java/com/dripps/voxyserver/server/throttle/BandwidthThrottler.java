@@ -1,6 +1,7 @@
 package com.dripps.voxyserver.server.throttle;
 
 import net.minecraft.resources.Identifier;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -10,8 +11,8 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Token-bucket egress bandwidth limiter, distance-based trickle scheduler,
- * and per-player bounded outbound packet queue manager.
+ * Token-bucket egress bandwidth limiter, distance-based trickle scheduler, and per-player bounded
+ * outbound packet queue manager.
  */
 public class BandwidthThrottler {
     private static final Logger LOGGER = LoggerFactory.getLogger("voxyserver");
@@ -20,7 +21,8 @@ public class BandwidthThrottler {
     public static final int MIN_BURST_BYTES = 512 * 1024; // 512 KB minimum burst capacity
 
     private final ConcurrentHashMap<UUID, TokenBucket> playerBuckets = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<UUID, PlayerOutboundQueue> playerQueues = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<UUID, PlayerOutboundQueue> playerQueues =
+            new ConcurrentHashMap<>();
 
     public static class TokenBucket {
         private volatile long bytesPerSecond;
@@ -39,9 +41,11 @@ public class BandwidthThrottler {
                 this.lastRefillNanos = System.nanoTime();
             } else {
                 this.unlimited = false;
-                // Burst capacity accommodates at least 2 seconds of traffic or MIN_BURST_BYTES (512 KB)
+                // Burst capacity accommodates at least 2 seconds of traffic or MIN_BURST_BYTES (512
+                // KB)
                 this.maxBurst = Math.max(bytesPerSecond * 2L, (long) MIN_BURST_BYTES);
-                this.availableTokens = Math.min(this.maxBurst, Math.max(bytesPerSecond, (long) MIN_BURST_BYTES));
+                this.availableTokens =
+                        Math.min(this.maxBurst, Math.max(bytesPerSecond, (long) MIN_BURST_BYTES));
                 this.lastRefillNanos = System.nanoTime();
             }
         }
@@ -75,7 +79,8 @@ public class BandwidthThrottler {
 
             long deltaTicks = currentTick - lastRefillTick;
             if (deltaTicks > 0) {
-                long cappedDeltaTicks = Math.min(deltaTicks, 200L); // cap at 10 seconds to prevent overflow
+                long cappedDeltaTicks =
+                        Math.min(deltaTicks, 200L); // cap at 10 seconds to prevent overflow
                 long tokensToAdd = (bytesPerSecond * cappedDeltaTicks) / 20L;
                 if (tokensToAdd > 0) {
                     availableTokens = Math.min(maxBurst, availableTokens + tokensToAdd);
@@ -136,7 +141,8 @@ public class BandwidthThrottler {
 
     public void registerPlayer(UUID uuid, long bytesPerSecond) {
         if (bytesPerSecond <= 0) {
-            LOGGER.info("Player {} registered with unlimited bandwidth (throttling disabled)", uuid);
+            LOGGER.info(
+                    "Player {} registered with unlimited bandwidth (throttling disabled)", uuid);
         }
         playerBuckets.put(uuid, new TokenBucket(bytesPerSecond));
         playerQueues.put(uuid, new PlayerOutboundQueue());
@@ -170,7 +176,10 @@ public class BandwidthThrottler {
         return bucket.tryAcquire(bytes);
     }
 
-    public boolean enqueuePacket(UUID uuid, PlayerOutboundQueue.QueuedPacket packet, List<PlayerOutboundQueue.QueuedPacket> evictedOut) {
+    public boolean enqueuePacket(
+            UUID uuid,
+            PlayerOutboundQueue.QueuedPacket packet,
+            List<PlayerOutboundQueue.QueuedPacket> evictedOut) {
         PlayerOutboundQueue queue = playerQueues.get(uuid);
         if (queue == null) return false;
         return queue.enqueue(packet, evictedOut);
@@ -210,27 +219,5 @@ public class BandwidthThrottler {
 
     public TokenBucket getBucket(UUID uuid) {
         return playerBuckets.get(uuid);
-    }
-
-    /**
-     * Determines whether a section at relative distance in sections should proceed or be deferred.
-     * Near (<= 16 sections) is streamed immediately.
-     * Mid-distance (17 ~ 48 sections) is trickled at 50% rate.
-     * Far-distance (> 48 sections) is trickled at 25% rate.
-     *
-     * @param distSections distance from player in sections (1 section = 32 blocks = 2 chunks)
-     * @param sequenceIndex monotonic candidate sequence index (decoupled from sent count)
-     * @param enablePacing whether pacing is enabled
-     * @return true if streaming should proceed, false if it should be deferred (trickled)
-     */
-    public boolean checkDistancePacing(int distSections, int sequenceIndex, boolean enablePacing) {
-        if (!enablePacing) return true;
-        if (distSections <= 16) {
-            return true;
-        }
-        if (distSections <= 48) {
-            return (sequenceIndex & 1) == 0;
-        }
-        return (sequenceIndex & 3) == 0;
     }
 }

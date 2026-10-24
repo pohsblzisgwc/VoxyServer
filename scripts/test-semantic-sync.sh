@@ -5,8 +5,8 @@ sync_test_classes="$(mktemp -d)"
 trap 'rm -rf -- "$sync_test_classes"' EXIT
 cd -- "$sync_repo_root"
 javac -d "$sync_test_classes" \
-    src/main/java/com/dripps/voxyserver/util/SemanticSectionHash.java \
-    src/main/java/com/dripps/voxyserver/util/HashWorkBudget.java \
+    src/test/java/com/dripps/voxyserver/util/SemanticSectionHash.java \
+    src/test/java/com/dripps/voxyserver/util/HashWorkBudget.java \
     src/main/java/com/dripps/voxyserver/util/BoundedLruCache.java \
     src/main/java/com/dripps/voxyserver/util/SessionEpoch.java \
     src/main/java/com/dripps/voxyserver/util/WorldIdentity.java \

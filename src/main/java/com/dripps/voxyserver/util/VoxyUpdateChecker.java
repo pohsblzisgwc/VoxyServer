@@ -3,12 +3,14 @@ package com.dripps.voxyserver.util;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+
 import net.fabricmc.api.EnvType;
 import net.fabricmc.loader.api.FabricLoader;
 import net.fabricmc.loader.api.ModContainer;
 import net.minecraft.ChatFormatting;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.MutableComponent;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -23,11 +25,18 @@ import java.util.Optional;
 
 public class VoxyUpdateChecker {
     private static final Logger LOGGER = LoggerFactory.getLogger("VoxyServer-Update");
-    private static final String UPDATE_URL = "https://gist.githubusercontent.com/PooSmacker/a4205e4b4d58a9b61054c9978c041408/raw/update.json";
+    private static final String UPDATE_URL =
+            "https://gist.githubusercontent.com/PooSmacker/a4205e4b4d58a9b61054c9978c041408/raw/update.json";
 
-    public record Notice(boolean updateAvailable, boolean breaking, String latest, String current,
-                         List<String> breakingReasons, boolean voxyUnsupported,
-                         List<String> supportedVoxy, String currentVoxy) {}
+    public record Notice(
+            boolean updateAvailable,
+            boolean breaking,
+            String latest,
+            String current,
+            List<String> breakingReasons,
+            boolean voxyUnsupported,
+            List<String> supportedVoxy,
+            String currentVoxy) {}
 
     private static volatile Notice pendingNotice;
     private static Thread updateThread;
@@ -41,66 +50,106 @@ public class VoxyUpdateChecker {
         if (FabricLoader.getInstance().getEnvironmentType() != EnvType.SERVER) {
             return;
         }
-        updateThread = new Thread(() -> {
-            try (HttpClient client = HttpClient.newBuilder()
-                    .connectTimeout(Duration.ofSeconds(5)).build()) {
+        updateThread =
+                new Thread(
+                        () -> {
+                            try (HttpClient client =
+                                    HttpClient.newBuilder()
+                                            .connectTimeout(Duration.ofSeconds(5))
+                                            .build()) {
 
-                HttpRequest request = HttpRequest.newBuilder()
-                        .uri(URI.create(UPDATE_URL))
-                        .timeout(Duration.ofSeconds(5))
-                        .header("User-Agent", "VoxyServer")
-                        .GET()
-                        .build();
+                                HttpRequest request =
+                                        HttpRequest.newBuilder()
+                                                .uri(URI.create(UPDATE_URL))
+                                                .timeout(Duration.ofSeconds(5))
+                                                .header("User-Agent", "VoxyServer")
+                                                .GET()
+                                                .build();
 
-                HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
-                if (response.statusCode() != 200) {
-                    return;
-                }
+                                HttpResponse<String> response =
+                                        client.send(request, HttpResponse.BodyHandlers.ofString());
+                                if (response.statusCode() != 200) {
+                                    return;
+                                }
 
-                if (Thread.currentThread().isInterrupted()) return;
-                JsonObject json = JsonParser.parseString(response.body()).getAsJsonObject();
-                String latestServerVer = json.get("latest_voxyserver").getAsString();
+                                if (Thread.currentThread().isInterrupted()) return;
+                                JsonObject json =
+                                        JsonParser.parseString(response.body()).getAsJsonObject();
+                                String latestServerVer =
+                                        json.get("latest_voxyserver").getAsString();
 
-                List<String> supportedVoxyVersions = new ArrayList<>();
-                if (json.has("supported_voxy") && json.get("supported_voxy").isJsonArray()) {
-                    for (JsonElement element : json.getAsJsonArray("supported_voxy")) {
-                        supportedVoxyVersions.add(element.getAsString());
-                    }
-                }
+                                List<String> supportedVoxyVersions = new ArrayList<>();
+                                if (json.has("supported_voxy")
+                                        && json.get("supported_voxy").isJsonArray()) {
+                                    for (JsonElement element :
+                                            json.getAsJsonArray("supported_voxy")) {
+                                        supportedVoxyVersions.add(element.getAsString());
+                                    }
+                                }
 
-                String currentServerVer = getModVersion("voxyserver");
-                String currentVoxyVer = getModVersion("voxy");
+                                String currentServerVer = getModVersion("voxyserver");
+                                String currentVoxyVer = getModVersion("voxy");
 
-                boolean serverNeedsUpdate = !currentServerVer.equals("Unknown") && !currentServerVer.equals(latestServerVer);
-                boolean voxyInstalled = !currentVoxyVer.equals("Unknown");
-                boolean voxyUnsupported = voxyInstalled && !supportedVoxyVersions.isEmpty() && !supportedVoxyVersions.contains(currentVoxyVer);
+                                boolean serverNeedsUpdate =
+                                        !currentServerVer.equals("Unknown")
+                                                && compareVersions(
+                                                                currentServerVer, latestServerVer)
+                                                        < 0;
+                                boolean voxyInstalled = !currentVoxyVer.equals("Unknown");
+                                boolean voxyUnsupported =
+                                        voxyInstalled
+                                                && !supportedVoxyVersions.isEmpty()
+                                                && !supportedVoxyVersions.contains(currentVoxyVer);
 
-                List<String> breakingReasons = new ArrayList<>();
-                if (serverNeedsUpdate && json.has("breaking_changes") && json.get("breaking_changes").isJsonArray()) {
-                    for (JsonElement element : json.getAsJsonArray("breaking_changes")) {
-                        if (!element.isJsonObject()) continue;
-                        JsonObject entry = element.getAsJsonObject();
-                        if (!entry.has("version")) continue;
-                        String version = entry.get("version").getAsString();
-                        String reason = entry.has("reason") ? entry.get("reason").getAsString() : "not backwards compatible";
-                        if (compareVersions(currentServerVer, version) < 0 && compareVersions(version, latestServerVer) <= 0) {
-                            breakingReasons.add(version + ": " + reason);
-                        }
-                    }
-                }
-                boolean breaking = !breakingReasons.isEmpty();
+                                List<String> breakingReasons = new ArrayList<>();
+                                if (serverNeedsUpdate
+                                        && json.has("breaking_changes")
+                                        && json.get("breaking_changes").isJsonArray()) {
+                                    for (JsonElement element :
+                                            json.getAsJsonArray("breaking_changes")) {
+                                        if (!element.isJsonObject()) continue;
+                                        JsonObject entry = element.getAsJsonObject();
+                                        if (!entry.has("version")) continue;
+                                        String version = entry.get("version").getAsString();
+                                        String reason =
+                                                entry.has("reason")
+                                                        ? entry.get("reason").getAsString()
+                                                        : "not backwards compatible";
+                                        if (compareVersions(currentServerVer, version) < 0
+                                                && compareVersions(version, latestServerVer) <= 0) {
+                                            breakingReasons.add(version + ": " + reason);
+                                        }
+                                    }
+                                }
+                                boolean breaking = !breakingReasons.isEmpty();
 
-                logToConsole(serverNeedsUpdate, breaking, latestServerVer, currentServerVer, breakingReasons,
-                        voxyUnsupported, supportedVoxyVersions, currentVoxyVer);
+                                logToConsole(
+                                        serverNeedsUpdate,
+                                        breaking,
+                                        latestServerVer,
+                                        currentServerVer,
+                                        breakingReasons,
+                                        voxyUnsupported,
+                                        supportedVoxyVersions,
+                                        currentVoxyVer);
 
-                if (serverNeedsUpdate || voxyUnsupported) {
-                    pendingNotice = new Notice(serverNeedsUpdate, breaking, latestServerVer, currentServerVer,
-                            breakingReasons, voxyUnsupported, supportedVoxyVersions, currentVoxyVer);
-                }
-            } catch (Exception e) {
-                LOGGER.debug("Could not check for VoxyServer updates.", e);
-            }
-        }, "VoxyServer Update Check");
+                                if (serverNeedsUpdate || voxyUnsupported) {
+                                    pendingNotice =
+                                            new Notice(
+                                                    serverNeedsUpdate,
+                                                    breaking,
+                                                    latestServerVer,
+                                                    currentServerVer,
+                                                    breakingReasons,
+                                                    voxyUnsupported,
+                                                    supportedVoxyVersions,
+                                                    currentVoxyVer);
+                                }
+                            } catch (Exception e) {
+                                LOGGER.debug("Could not check for VoxyServer updates.", e);
+                            }
+                        },
+                        "VoxyServer Update Check");
         updateThread.setDaemon(true);
         updateThread.setPriority(Thread.MIN_PRIORITY);
         updateThread.start();
@@ -124,14 +173,25 @@ public class VoxyUpdateChecker {
         pendingNotice = null;
     }
 
-    private static void logToConsole(boolean serverNeedsUpdate, boolean breaking, String latest, String current,
-                                     List<String> breakingReasons, boolean voxyUnsupported,
-                                     List<String> supportedVoxy, String currentVoxy) {
+    private static void logToConsole(
+            boolean serverNeedsUpdate,
+            boolean breaking,
+            String latest,
+            String current,
+            List<String> breakingReasons,
+            boolean voxyUnsupported,
+            List<String> supportedVoxy,
+            String currentVoxy) {
         if (serverNeedsUpdate) {
             LOGGER.warn("=====================================================");
             if (breaking) {
-                LOGGER.warn("BREAKING UPDATE available for VoxyServer: {} (you run {})", latest, current);
-                LOGGER.warn("This update is NOT backwards compatible. Connected clients must update too.");
+                LOGGER.warn(
+                        "BREAKING UPDATE available for VoxyServer: {} (you run {})",
+                        latest,
+                        current);
+                LOGGER.warn(
+                        "This update is NOT backwards compatible. Connected clients must update"
+                            + " too.");
                 for (String reason : breakingReasons) {
                     LOGGER.warn("  - {}", reason);
                 }
@@ -141,13 +201,17 @@ public class VoxyUpdateChecker {
             }
             LOGGER.warn("Please check modrinth for the latest version");
             if (voxyUnsupported) {
-                LOGGER.warn("IMPORTANT: supported Voxy versions: {}", String.join(", ", supportedVoxy));
+                LOGGER.warn(
+                        "IMPORTANT: supported Voxy versions: {}", String.join(", ", supportedVoxy));
                 LOGGER.warn("Your current Voxy version is: {}", currentVoxy);
             }
             LOGGER.warn("=====================================================");
         } else if (voxyUnsupported) {
             LOGGER.warn("=====================================================");
-            LOGGER.warn("Your Voxy version ({}) is not in the supported list for VoxyServer {}.", currentVoxy, current);
+            LOGGER.warn(
+                    "Your Voxy version ({}) is not in the supported list for VoxyServer {}.",
+                    currentVoxy,
+                    current);
             LOGGER.warn("Supported Voxy versions: {}", String.join(", ", supportedVoxy));
             LOGGER.warn("=====================================================");
         } else {
@@ -157,26 +221,48 @@ public class VoxyUpdateChecker {
 
     public static MutableComponent buildNoticeComponent(Notice notice) {
         MutableComponent out = Component.empty();
-        out.append(Component.literal("[VoxyServer] ").withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD));
+        out.append(
+                Component.literal("[VoxyServer] ")
+                        .withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD));
 
         if (notice.breaking()) {
-            out.append(Component.literal("breaking update available").withStyle(ChatFormatting.RED, ChatFormatting.BOLD));
-            out.append(Component.literal("\n" + notice.current() + " -> " + notice.latest()
-                            + ", not backwards compatible. clients must update too.")
-                    .withStyle(ChatFormatting.RED));
+            out.append(
+                    Component.literal("breaking update available")
+                            .withStyle(ChatFormatting.RED, ChatFormatting.BOLD));
+            out.append(
+                    Component.literal(
+                                    "\n"
+                                            + notice.current()
+                                            + " -> "
+                                            + notice.latest()
+                                            + ", not backwards compatible. clients must update"
+                                            + " too.")
+                            .withStyle(ChatFormatting.RED));
             for (String reason : notice.breakingReasons()) {
                 out.append(Component.literal("\n  " + reason).withStyle(ChatFormatting.GRAY));
             }
         } else if (notice.updateAvailable()) {
-            out.append(Component.literal("update available").withStyle(ChatFormatting.YELLOW, ChatFormatting.BOLD));
-            out.append(Component.literal("\n" + notice.current() + " -> " + notice.latest() + " (see modrinth)")
-                    .withStyle(ChatFormatting.YELLOW));
+            out.append(
+                    Component.literal("update available")
+                            .withStyle(ChatFormatting.YELLOW, ChatFormatting.BOLD));
+            out.append(
+                    Component.literal(
+                                    "\n"
+                                            + notice.current()
+                                            + " -> "
+                                            + notice.latest()
+                                            + " (see modrinth)")
+                            .withStyle(ChatFormatting.YELLOW));
         }
 
         if (notice.voxyUnsupported()) {
-            out.append(Component.literal("\nyour Voxy " + notice.currentVoxy() + " is not in the supported list: "
-                            + String.join(", ", notice.supportedVoxy()))
-                    .withStyle(ChatFormatting.GOLD));
+            out.append(
+                    Component.literal(
+                                    "\nyour Voxy "
+                                            + notice.currentVoxy()
+                                            + " is not in the supported list: "
+                                            + String.join(", ", notice.supportedVoxy()))
+                            .withStyle(ChatFormatting.GOLD));
         }
         return out;
     }
