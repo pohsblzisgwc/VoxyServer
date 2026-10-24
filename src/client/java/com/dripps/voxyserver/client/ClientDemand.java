@@ -60,7 +60,7 @@ public final class ClientDemand {
         final long[] digests;
         final Long2IntOpenHashMap local;
         final VersionTables tables;
-        long lastActivity = System.nanoTime();
+        volatile long lastActivity = System.nanoTime();
         int retries, page, pages;
         long[] keys;
         int[] versions;
@@ -281,19 +281,22 @@ public final class ClientDemand {
     }
 
     private static void select(Context c, Round r) {
-        int a = r.page * 256, b = Math.min(a + 256, r.keys.length);
-        r.pageAllowed.clear();
-        for (int i = a; i < b; i++) r.pageAllowed.put(r.keys[i], r.versions[i]);
-        send(
-                c,
-                new VersionSelectPayload(
-                        c.session.epoch(),
-                        r.id,
-                        r.page,
-                        r.pages,
-                        Arrays.copyOfRange(r.keys, a, b),
-                        Arrays.copyOfRange(r.versions, a, b)));
-        r.lastActivity = System.nanoTime();
+        synchronized (LOCAL_LOCK) {
+            if (round != r || !current(c)) return;
+            int a = r.page * 256, b = Math.min(a + 256, r.keys.length);
+            r.pageAllowed.clear();
+            for (int i = a; i < b; i++) r.pageAllowed.put(r.keys[i], r.versions[i]);
+            send(
+                    c,
+                    new VersionSelectPayload(
+                            c.session.epoch(),
+                            r.id,
+                            r.page,
+                            r.pages,
+                            Arrays.copyOfRange(r.keys, a, b),
+                            Arrays.copyOfRange(r.versions, a, b)));
+            r.lastActivity = System.nanoTime();
+        }
     }
 
     private static void handle(Context c, CustomPacketPayload p) {
@@ -363,12 +366,15 @@ public final class ClientDemand {
     }
 
     private static void abort(Context c, Round r, boolean cancel) {
-        if (round != r) return;
-        if (cancel) send(c, new VersionCancelPayload(c.session.epoch(), r.id));
-        round = null;
-        failed++;
-        nextAudit =
-                System.nanoTime() + ThreadLocalRandom.current().nextLong(90, 151) * 1_000_000_000L;
+        synchronized (LOCAL_LOCK) {
+            if (round != r) return;
+            if (cancel) send(c, new VersionCancelPayload(c.session.epoch(), r.id));
+            round = null;
+            failed++;
+            nextAudit =
+                    System.nanoTime()
+                            + ThreadLocalRandom.current().nextLong(90, 151) * 1_000_000_000L;
+        }
     }
 
     /**
@@ -456,7 +462,7 @@ public final class ClientDemand {
                     } catch (java.io.IOException e) {
                         com.dripps.voxyserver.Voxyserver.LOGGER.warn(
                                 "client versions invalid; preserving terrain and requesting fresh"
-                                    + " data: {}",
+                                        + " data: {}",
                                 e.toString());
                     }
                     synchronized (LOCAL_LOCK) {
