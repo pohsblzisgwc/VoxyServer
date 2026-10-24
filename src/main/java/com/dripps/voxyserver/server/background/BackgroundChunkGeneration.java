@@ -40,6 +40,7 @@ public final class BackgroundChunkGeneration {
 
     private record Target(UUID player, ServerLevel level, ChunkPos position) {}
 
+    private final GenerationAdmissionState inheritedDebt;
     private final MinecraftServer server;
     private final LodStreamingService streaming;
     private VoxyServerConfig config;
@@ -52,14 +53,20 @@ public final class BackgroundChunkGeneration {
     private String lastState = "disabled";
 
     public BackgroundChunkGeneration(
-            MinecraftServer server, LodStreamingService streaming, VoxyServerConfig cfg) {
+            MinecraftServer server,
+            LodStreamingService streaming,
+            VoxyServerConfig cfg,
+            GenerationAdmissionState inheritedDebt) {
+        this.inheritedDebt = Objects.requireNonNull(inheritedDebt);
         if (ticketType == null)
             throw new IllegalStateException("background ticket type not registered");
         this.server = server;
         this.streaming = streaming;
         config = cfg.copy();
         history = new BoundedLruCache<>(Math.max(1, cfg.backgroundGenerationHistorySize));
-        controller = new BackgroundGenerationController<>(new NativeBackend(), cfg);
+        controller =
+                new BackgroundGenerationController<>(
+                        new NativeBackend(), cfg, System::nanoTime, inheritedDebt.rateBudget());
     }
 
     public void startTick() {
@@ -90,7 +97,7 @@ public final class BackgroundChunkGeneration {
             if (mspt(System.nanoTime()) > config.backgroundGenerationStopMspt)
                 controller.tick(tick, System.nanoTime(), mspt(System.nanoTime()), suspended);
         } catch (RuntimeException failure) {
-            controller.shutdown();
+            controller.shutdown(inheritedDebt::retain);
             Voxyserver.LOGGER.error(
                     "background generation stopped after scheduler failure", failure);
         }
@@ -120,7 +127,7 @@ public final class BackgroundChunkGeneration {
     }
 
     public void shutdown() {
-        controller.shutdown();
+        controller.shutdown(inheritedDebt::retain);
     }
 
     public BackgroundGenerationController.Stats stats() {
@@ -162,6 +169,11 @@ public final class BackgroundChunkGeneration {
     }
 
     private final class NativeBackend implements BackgroundGenerationController.Backend<Target> {
+        @Override
+        public int externalInFlight() {
+            return inheritedDebt.size();
+        }
+
         @Override
         public Target candidate() {
             var players = server.getPlayerList().getPlayers();

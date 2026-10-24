@@ -6,7 +6,7 @@ a fabric server side mod that voxelizes chunks into LODs using [voxy](https://gi
 
 ## how it works
 
-Release **v1.2.7** uses **protocol 5** on Fabric / Minecraft 26.3. Both sides must update together. Published `v1.2.5` (`4deea7a`) is unchanged.
+Release **v1.2.8** uses **protocol 5** on Fabric / Minecraft 26.3. Both sides must update together. Published `v1.2.5` (`4deea7a`) is unchanged.
 
 The client derives demand from Voxy's actual render subscriptions at native LOD levels **0–4**. Each node contains 32³ voxels and spans `32 << level` blocks. Voxy's `sectionRenderDistance` uses **512-block top-level units**: values 16 and 32 mean 512 and 1024 Minecraft chunks. The remote range is capped by the native view, personal preference and server maximum. The server validates the requested coordinates, dimension, epoch and rate without enumerating the view grid or the database.
 
@@ -119,7 +119,7 @@ Old `tickInterval`, `dirtyTrackingInterval`, `enableDistancePacing`, `enableRegi
 
 Configuration is validated before application or saving. Invalid startup files produce field-specific diagnostics and use validated defaults without overwriting the file. Invalid reloads retain the current validated configuration; commands and saves use the same validation guard. Changing chunk lifecycle generation flags or enabling/disabling dirty tracking still requires a runtime restart (disable, then enable) or server restart.
 
-In v1.2.7 all defaults stay unchanged. Workload/timing integer settings now accept positive 32-bit values (up to 2,147,483,647); bandwidth, quiet/cooldown times and background delay/hold/backlog/history/recheck accept zero as documented. Generation starts accept 1..600000 per minute. The view protocol still limits radius to 4096, packets to 16 nodes, and queues retain their byte/packet caps. Voxy service threads accept 1..10000 because the native pool's shutdown releases 10000 permits. These technical bounds remain enforced.
+In v1.2.8 all defaults stay unchanged. Workload/timing integer settings now accept positive 32-bit values (up to 2,147,483,647); bandwidth, quiet/cooldown times and background delay/hold/backlog/history/recheck accept zero as documented. Generation starts accept 1..600000 per minute. The view protocol still limits radius to 4096, packets to 16 nodes, and queues retain their byte/packet caps. Voxy service threads accept 1..10000 because the native pool's shutdown releases 10000 permits. These technical bounds remain enforced.
 
 ### global runtime switch
 
@@ -133,9 +133,9 @@ These administrator-only commands stop, start and query the dedicated-server run
 
 Disabling detaches event/network admission first, releases owned generation tickets, stops imports, checkpoints unfinished dirty work, drains the maintenance worker, clears subscriptions, ACK/batch state and bandwidth queues, then closes the Voxy engine/storage pool. Dirty hooks return immediately and source snapshot writer monitors are bypassed after draining. Permanent event bridges and command/payload registrations are installed once and retain no stopped runtime; repeated enable/disable does not accumulate handlers. Commands return after owned shutdown work finishes; checkpoint/storage flushes can take time. A failed shutdown blocks creation of replacement workers until a server restart and reports an error.
 
-While disabled there are **no VoxyServer background jobs, hash scans, world generation, data streams, periodic config reads or update requests** on the server. Classes, commands, payload registration and constant-time event/null checks (plus a pause reply to an explicit handshake) still occupy a small amount of memory/CPU: a loaded, reversible mod cannot honestly promise literal zero resources. Already dispatched shared vanilla generation/I/O may finish; it is not forcibly interrupted. One-time draining/checkpoint/notification work is part of shutdown. This switch controls VoxyServer's server runtime, not ordinary client Voxy rendering/cache ownership.
+While disabled there are **no VoxyServer background jobs, hash scans, world generation, data streams, periodic config reads or update requests** on the server. Classes, commands, payload registration and constant-time event/null checks (plus a pause reply to an explicit handshake) still occupy a small amount of memory/CPU: a loaded, reversible mod cannot honestly promise literal zero resources. Already dispatched shared vanilla generation/I/O may finish; it is not forcibly interrupted. One-time draining/checkpoint/notification work is part of shutdown. Unfinished native generation/probe futures retain lightweight concurrency debt across disable/re-enable. Rate credit/minute usage also survives runtime replacement, so toggling cannot mint extra starts. Completion callbacks release it without a polling thread, and the next runtime admits no replacement work beyond the configured concurrency until it drains. This switch controls VoxyServer's server runtime, not ordinary client Voxy rendering/cache ownership.
 
-Because disabled mode does not poll the filesystem, re-enable with the command, or edit the file and run `/voxyserver reload`, or restart the server. Re-enabling recreates services and gives compatible **v1.2.7 clients** a new handshake/session without erasing their stored terrain. Protocol 5's existing integer advertisement uses `0` to pause and the matching version to resume; the wire layout stays unchanged. Older clients may need to reconnect after re-enable. Stored LOD/dirty journals remain on disk. Block changes made while the mod is completely off are not recorded or retroactively rebuilt; later chunk load/unload updates, imports or newly marked source work refresh that terrain. No full-world scan runs on re-enable. Singleplayer/LAN runtime support is unchanged.
+Because disabled mode does not poll the filesystem, re-enable with the command, or edit the file and run `/voxyserver reload`, or restart the server. Re-enabling recreates services and gives compatible **v1.2.8 clients** a new handshake/session without erasing their stored terrain. Protocol 5's existing integer advertisement uses `0` to pause and the matching version to resume; the wire layout stays unchanged. Older clients may need to reconnect after re-enable. Stored LOD/dirty journals remain on disk. Block changes made while the mod is completely off are not recorded or retroactively rebuilt; later chunk load/unload updates, imports or newly marked source work refresh that terrain. No full-world scan runs on re-enable. Singleplayer/LAN runtime support is unchanged.
 
 ### maintenance and memory
 
@@ -201,11 +201,11 @@ The scheduler regression simulates 1,200 ticks with concurrent jobs and a high-M
 
 ### 中文命令速查
 
-**v1.2.7 限额调整：默认仍为每分钟 6 个目标，允许范围扩大到 1–600000。** 并发、候选数、调度预算、半径和等待时间等策略上限已放宽；允许的最大整数为 2147483647。实际吞吐仍同时受并发、候选检查间隔、候选数、调度预算和 MSPT 限制。只提高每分钟额度不会自动提高其他设置。服务端不保证真实生成能达到配置上限。
+**v1.2.8 限额调整：默认仍为每分钟 6 个目标，允许范围扩大到 1–600000。** 并发、候选数、调度预算、半径和等待时间等策略上限已放宽；允许的最大整数为 2147483647。实际吞吐仍同时受并发、候选检查间隔、候选数、调度预算和 MSPT 限制。只提高每分钟额度不会自动提高其他设置。服务端不保证真实生成能达到配置上限。
 
 所有 `/voxyserver` 命令（含 help、查询、stats、导入与修改）统一由服务端检查 `COMMANDS_ADMIN` 权限，对应原版权限等级 3 或更高。客户端提交命令不能绕过检查；普通玩家的远景需求协议仍可正常使用。
 
-以下命令适用于 **v1.2.7 / 协议 5**。游戏内需要管理员权限；在服务器控制台执行时，去掉开头的 `/`。下列命令调整的是服务端行为，客户端与服务端仍需使用兼容的协议版本。
+以下命令适用于 **v1.2.8 / 协议 5**。游戏内需要管理员权限；在服务器控制台执行时，去掉开头的 `/`。下列命令调整的是服务端行为，客户端与服务端仍需使用兼容的协议版本。
 
 #### 查看、修改、保存与重载
 
@@ -219,7 +219,7 @@ The scheduler regression simulates 1,200 ticks with concurrent jobs and a high-M
 
 分别为完全停止服务端运行实例、重新创建实例、查询开关。等价配置项是 `enabled`，例如 `/voxyserver config set enabled false`。关闭会收尾导入、保存待维护日志、停止自有线程、清空运行队列并释放自有票据；客户端已有地形和服务端磁盘数据保留。关闭期间不自动检查配置文件，也不检查更新；编辑配置后需手动 `/voxyserver reload` 才能恢复。
 
-这里“完全关闭”指没有模组后台任务和数据流。已加载的类、管理命令与事件入口仍有少量常驻内存和判断成本；原版已派发的共享任务不能强杀。关闭命令会等待自有任务和存储收尾，不承诺零耗时。关闭期间发生的方块变化不会被记录，恢复时不全图回扫；相关数据会随后续源更新或管理员导入刷新。在线恢复建议两端使用 v1.2.7，旧客户端可能需要重连。集成端支持保持原样。
+这里“完全关闭”指没有模组后台任务和数据流。已加载的类、管理命令与事件入口仍有少量常驻内存和判断成本；原版已派发的共享任务不能强杀。关闭命令会等待自有任务和存储收尾，不承诺零耗时。关闭期间发生的方块变化不会被记录，恢复时不全图回扫；相关数据会随后续源更新或管理员导入刷新。全服速率额度和本分钟已用量也跨开关保留，不能靠反复开关获得额外启动额度。关闭前尚未完成的原版生成/探测 Future 保留轻量并发占用，完成回调自动释放，不另开轮询线程；立即重开也不会绕过并发上限。在线恢复建议两端使用 v1.2.8，旧客户端可能需要重连。集成端支持保持原样。
 
 | 命令 | 作用 |
 |------|------|

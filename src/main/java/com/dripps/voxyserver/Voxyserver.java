@@ -31,6 +31,8 @@ public class Voxyserver implements ModInitializer {
     private static volatile VoxyServerConfig config;
     private static volatile boolean snapshotsRequired;
     private final RuntimeSwitch<ServerRuntime> runtime = new RuntimeSwitch<>();
+    private final com.dripps.voxyserver.server.background.GenerationAdmissionState generationDebt =
+            new com.dripps.voxyserver.server.background.GenerationAdmissionState();
     private final Set<UUID> statsSubscribers = ConcurrentHashMap.newKeySet();
     private MinecraftServer server;
     private long lastConfigModified;
@@ -117,7 +119,7 @@ public class Voxyserver implements ModInitializer {
                     else
                         LOGGER.info(
                                 "VoxyServer globally disabled; no engine, workers, config polling"
-                                    + " or update check started");
+                                        + " or update check started");
                 });
         ServerLifecycleEvents.SERVER_STOPPING.register(
                 s -> {
@@ -150,7 +152,7 @@ public class Voxyserver implements ModInitializer {
         if (server == null || !server.isDedicatedServer()) return;
         try {
             snapshotsRequired = true;
-            runtime.start(() -> new ServerRuntime(server, config));
+            runtime.start(() -> new ServerRuntime(server, config, generationDebt));
             VoxyUpdateChecker.checkForUpdates();
             configCheckCounter = 0;
             statsBroadcastCounter = 0;

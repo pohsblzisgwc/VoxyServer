@@ -17,14 +17,17 @@ public final class ServerRuntime implements AutoCloseable {
     private DirtyTracker dirty;
     private ServerStatsTracker stats;
 
-    public ServerRuntime(MinecraftServer server, VoxyServerConfig config) {
+    public ServerRuntime(
+            MinecraftServer server,
+            VoxyServerConfig config,
+            com.dripps.voxyserver.server.background.GenerationAdmissionState generationDebt) {
         try {
             engine = new ServerLodEngine(server.getWorldPath(LevelResource.ROOT));
             engine.updateDedicatedThreadsCount(config.workerThreads);
             streaming = new LodStreamingService(engine, config);
             voxelizer = new ChunkVoxelizer(engine, streaming, config);
             imports = new WorldImportCoordinator(engine, streaming);
-            background = new BackgroundChunkGeneration(server, streaming, config);
+            background = new BackgroundChunkGeneration(server, streaming, config, generationDebt);
             if (config.dirtyTrackingEnabled)
                 dirty = new DirtyTracker(voxelizer, streaming, config.dirtyTrackingInterval);
             stats = new ServerStatsTracker(config.debugTrackingInterval);

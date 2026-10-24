@@ -29,6 +29,10 @@ public final class BackgroundGenerationController<T> {
 
         default void retain(T target) {}
 
+        default int externalInFlight() {
+            return 0;
+        }
+
         default boolean overloaded() {
             return false;
         }
@@ -74,7 +78,7 @@ public final class BackgroundGenerationController<T> {
 
     private final Backend<T> backend;
     private final Map<Object, Job> jobs = new LinkedHashMap<>();
-    private final GenerationRateBudget rateBudget = new GenerationRateBudget();
+    private final GenerationRateBudget rateBudget;
     private final java.util.function.LongSupplier workClock;
     private VoxyServerConfig config;
     private long lowSince = -1, lastTick, nextProbeTick;
@@ -92,8 +96,17 @@ public final class BackgroundGenerationController<T> {
             Backend<T> backend,
             VoxyServerConfig config,
             java.util.function.LongSupplier workClock) {
+        this(backend, config, workClock, new GenerationRateBudget());
+    }
+
+    public BackgroundGenerationController(
+            Backend<T> backend,
+            VoxyServerConfig config,
+            java.util.function.LongSupplier workClock,
+            GenerationRateBudget rateBudget) {
         this.backend = backend;
         this.workClock = workClock;
+        this.rateBudget = Objects.requireNonNull(rateBudget);
         config.requireValid();
         this.config = config.copy();
     }
@@ -211,13 +224,10 @@ public final class BackgroundGenerationController<T> {
                 if (job.future == null || job.future.isDone()) it.remove();
             }
         }
-        if (!headroom
-                || tick < nextProbeTick
-                || jobs.size() >= config.backgroundGenerationMaxConcurrent) return;
+        if (!headroom || tick < nextProbeTick || !hasCapacity()) return;
         nextProbeTick = tick + config.backgroundGenerationCheckIntervalTicks;
         for (int attempt = 0;
-                attempt < config.backgroundGenerationCandidatesPerPass
-                        && jobs.size() < config.backgroundGenerationMaxConcurrent;
+                attempt < config.backgroundGenerationCandidatesPerPass && hasCapacity();
                 attempt++) {
             if (stopIfOverloaded()) return;
             if (workClock.getAsLong() - began >= limit) break;
@@ -235,6 +245,11 @@ public final class BackgroundGenerationController<T> {
                 jobs.remove(job.key);
             }
         }
+    }
+
+    private boolean hasCapacity() {
+        return (long) jobs.size() + Math.max(0, backend.externalInFlight())
+                < config.backgroundGenerationMaxConcurrent;
     }
 
     private boolean stopIfOverloaded() {
@@ -281,7 +296,13 @@ public final class BackgroundGenerationController<T> {
     }
 
     public void shutdown() {
+        shutdown(future -> {});
+    }
+
+    public void shutdown(java.util.function.Consumer<CompletableFuture<?>> unfinished) {
         cancelAll();
+        for (var job : jobs.values())
+            if (job.future != null && !job.future.isDone()) unfinished.accept(job.future);
         jobs.clear();
         closed = true;
         state = "stopped";
@@ -293,12 +314,13 @@ public final class BackgroundGenerationController<T> {
             if (job.ticket) tickets++;
             if (job.cancelled) debt++;
         }
+        int external = Math.max(0, backend.externalInFlight());
         return new Stats(
                 state,
                 mspt,
-                jobs.size(),
+                (int) Math.min(Integer.MAX_VALUE, (long) jobs.size() + external),
                 tickets,
-                debt,
+                (int) Math.min(Integer.MAX_VALUE, (long) debt + external),
                 probes,
                 skippedExisting,
                 started,

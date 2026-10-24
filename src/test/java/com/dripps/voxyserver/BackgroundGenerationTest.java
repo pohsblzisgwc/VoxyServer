@@ -15,6 +15,13 @@ public final class BackgroundGenerationTest {
                 generations = new HashMap<>();
         final Set<Integer> invalid = new HashSet<>(), owned = new HashSet<>();
         int releases, ingested, samples, maxTickets, retained, overloadAfter = Integer.MAX_VALUE;
+        GenerationAdmissionState inherited = new GenerationAdmissionState();
+
+        @Override
+        public int externalInFlight() {
+            return inherited.size();
+        }
+
         boolean failGeneration;
 
         @Override
@@ -94,6 +101,7 @@ public final class BackgroundGenerationTest {
         duplicates();
         pressure();
         enlargedBatchAndRetention();
+        debtAcrossRuntimeRestarts();
         System.out.println(
                 "PASS BackgroundGenerationTest: MSPT hysteresis/instant cancellation, global"
                     + " no-burst rate, async debt, movement, timeout, reload, ticket release and"
@@ -402,6 +410,85 @@ public final class BackgroundGenerationTest {
                     p == null || BackgroundGenerationArea.isWorldChunk(p),
                     "extreme radius escaped world");
         }
+    }
+
+    private static void debtAcrossRuntimeRestarts() {
+        var debt = new GenerationAdmissionState();
+        var c = config();
+        var before = new Backend();
+        before.inherited = debt;
+        before.candidates.add(1);
+        var original = new BackgroundGenerationController<>(before, c, () -> 0L, debt.rateBudget());
+        original.tick(0, 0, 20, false);
+        before.probes.get(1).complete(false);
+        original.tick(1, 1, 20, false);
+        original.shutdown(debt::retain);
+        require(
+                before.owned.isEmpty() && debt.size() == 1,
+                "shutdown discarded unfinished native debt");
+        require(!before.generations.get(1).isCancelled(), "shutdown cancelled a shared future");
+        var after = new Backend();
+        after.inherited = debt;
+        after.candidates.add(2);
+        var restored = new BackgroundGenerationController<>(after, c, () -> 0L, debt.rateBudget());
+        for (int tick = 0; tick < 100; tick++) restored.tick(tick, tick * 50_000_000L, 20, false);
+        require(
+                after.samples == 0
+                        && restored.stats().draining() == 1
+                        && restored.stats().inFlight() == 1,
+                "runtime restart ignored previous generation concurrency");
+        restored.shutdown(debt::retain);
+        require(debt.size() == 1, "repeated shutdown lost inherited debt");
+        var latest = new BackgroundGenerationController<>(after, c, () -> 0L, debt.rateBudget());
+        before.generations.get(1).complete(true);
+        require(
+                debt.size() == 0 && before.ingested == 0,
+                "native completion retained debt or invoked old ingestion");
+        latest.tick(100, 10 * SECOND, 20, false);
+        require(after.probes.containsKey(2), "native drain did not reopen replacement admission");
+        latest.shutdown(debt::retain);
+        require(debt.size() == 1, "unfinished probe not retained across shutdown");
+        after.probes.get(2).completeExceptionally(new IllegalStateException("disk failure"));
+        require(debt.size() == 0, "exceptional native completion leaked concurrency");
+        var done = CompletableFuture.completedFuture(true);
+        debt.retain(done);
+        require(debt.size() == 0, "completed work retained as debt");
+        var pending = new CompletableFuture<Boolean>();
+        debt.retain(pending);
+        debt.retain(pending);
+        require(debt.size() == 1, "same future counted twice");
+        pending.complete(false);
+        require(debt.size() == 0, "completion race retained debt");
+        var quota = new GenerationAdmissionState();
+        var first = new Backend();
+        first.inherited = quota;
+        first.candidates.add(10);
+        var firstRuntime =
+                new BackgroundGenerationController<>(first, c, () -> 0L, quota.rateBudget());
+        firstRuntime.tick(0, 0, 20, false);
+        first.probes.get(10).complete(false);
+        firstRuntime.tick(1, 1, 20, false);
+        firstRuntime.shutdown(quota::retain);
+        first.generations.get(10).complete(true);
+        var second = new Backend();
+        second.inherited = quota;
+        second.candidates.add(11);
+        var secondRuntime =
+                new BackgroundGenerationController<>(second, c, () -> 0L, quota.rateBudget());
+        secondRuntime.tick(2, 2, 20, false);
+        second.probes.get(11).complete(false);
+        secondRuntime.tick(3, 3, 20, false);
+        require(
+                secondRuntime.stats().started() == 0,
+                "runtime restart minted a fresh generation rate allowance");
+        secondRuntime.tick(4, 10 * SECOND + 1, 20, false);
+        require(secondRuntime.stats().started() == 1, "retained rate allowance failed recovery");
+        secondRuntime.shutdown(quota::retain);
+        second.generations.get(11).complete(true);
+        require(quota.size() == 0, "rate recovery cleanup retained debt");
+        System.out.println(
+                "PASS background debt across runtime restarts: no replacement generation/probes"
+                        + " before shared work completes; no polling thread");
     }
 
     private static void require(boolean condition, String message) {
