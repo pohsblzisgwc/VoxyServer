@@ -108,6 +108,7 @@ public final class ClientDemand {
             INTERESTS = new AtomicLong();
     private static final ThreadLocal<Boolean> RESUMING = ThreadLocal.withInitial(() -> false);
     private static volatile Context context;
+    private static LODStreamSessionPayload pendingSession;
     private static long workerGeneration = -1, interestVersion = -1, audits;
     private static int centerX, centerZ, radius;
 
@@ -119,20 +120,30 @@ public final class ClientDemand {
     private ClientDemand() {}
 
     public static void start(LODStreamSessionPayload p) {
+        reset();
+        pendingSession = p;
+        tryActivateSession();
+    }
+
+    private static void tryActivateSession() {
+        var p = pendingSession;
+        if (p == null || !ClientLodSettings.isProtocolOk() || !ClientLodSettings.isEnabled())
+            return;
         Minecraft mc = Minecraft.getInstance();
+        if (mc == null
+                || mc.level == null
+                || mc.player == null
+                || !p.dimension().equals(mc.level.dimension().identifier())) return;
         var level = mc.level;
         var player = mc.player;
-        if (level == null
-                || player == null
-                || !p.dimension().equals(level.dimension().identifier())) {
-            reset();
-            return;
-        }
         WorldIdentifier id = WorldIdentifier.of(level);
-        if (id == null) {
-            reset();
-            return;
-        }
+        if (id == null) return;
+        pendingSession = null;
+        com.dripps.voxyserver.Voxyserver.LOGGER.info(
+                "remote LOD session active: dimension={} epoch={} radiusChunks={}",
+                p.dimension(),
+                p.streamEpoch(),
+                effectiveRadius());
         context =
                 new Context(
                         GENERATION.incrementAndGet(),
@@ -148,6 +159,9 @@ public final class ClientDemand {
     }
 
     public static void tick() {
+        if (pendingSession != null
+                && ClientLodSettings.isProtocolOk()
+                && ClientLodSettings.isEnabled()) tryActivateSession();
         Context c = context;
         if (c == null) return;
         Minecraft mc = Minecraft.getInstance();
@@ -180,6 +194,7 @@ public final class ClientDemand {
     }
 
     public static void reset() {
+        pendingSession = null;
         context = null;
         GENERATION.incrementAndGet();
     }
@@ -486,6 +501,7 @@ public final class ClientDemand {
                             g.building = true;
                             g.audit = ++audits;
                             g.dirty = false;
+                            g.beginLocalProof();
                         }
                         boolean complete = true;
                         for (int i = 0; i < 64; i++)
@@ -536,6 +552,7 @@ public final class ClientDemand {
                                     if (present) resume(w);
                                 }
                                 g.hashes[i] = w.hash;
+                                g.observeLocalPresence(i, w.localPresent);
                             }
                         if (!complete) continue;
                         g.begin(c.epoch, IDS.incrementAndGet());
@@ -543,7 +560,9 @@ public final class ClientDemand {
                     }
                     if (sends >= 1 || !g.takeAttempt(now))
                         continue; // <=20 requests/sec, distributed over groups.
-                    long coverage = g.coverage & g.wanted;
+                    long coverage =
+                            (g.phase == LODDemandPayload.SUMMARY ? g.localCoverage : g.coverage)
+                                    & g.wanted;
                     send(
                             c,
                             new LODDemandPayload(

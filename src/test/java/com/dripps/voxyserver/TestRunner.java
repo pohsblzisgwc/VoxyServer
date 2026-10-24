@@ -14,16 +14,19 @@ public class TestRunner {
         System.out.println("=================================================\n");
 
         int passedSuites = 0;
-        int totalSuites = 19;
+        int totalSuites = 22;
 
         try {
             RuntimeLifecycleTest.runAllTests();passedSuites++;
             GenerationRateBudgetTest.runAllTests();passedSuites++;
             CommandPermissionTest.runAllTests();passedSuites++;
+            ConfigResetTest.runAllTests();passedSuites++;
             BackgroundGenerationTest.runAllTests();passedSuites++;
             DemandProtocolTest.runAllTests();passedSuites++;
             DemandStateTest.runAllTests();passedSuites++;
             DirtyMaintenanceTest.runAllTests();passedSuites++;
+            SurfaceMaintenanceTest.runAllTests();passedSuites++;
+            MaintenanceWakeupTest.runAllTests();passedSuites++;
             com.dripps.voxyserver.server.DemandIndexTest.runAllTests();passedSuites++;
             com.dripps.voxyserver.server.DemandLoadTest.runAllTests();passedSuites++;
             ManifestSnapshotTest.runAllTests();

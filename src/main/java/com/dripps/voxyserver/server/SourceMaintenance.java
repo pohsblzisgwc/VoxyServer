@@ -27,6 +27,12 @@ final class SourceMaintenance {
     final DirtyRegionQueue<ServerLevel> dirty;
     private final ServerLodEngine engine;
     private final Path journal;
+    private final Runnable wake;
+
+    private record Root(ServerLevel level, long key) {}
+
+    private final com.dripps.voxyserver.util.BoundedLruCache<Root, Integer> surfaces =
+            new com.dripps.voxyserver.util.BoundedLruCache<>(65536);
     private DirtyRegionQueue.Work<ServerLevel> active;
     private CompletableFuture<List<Piece>> snapshot;
     private List<Piece> pieces;
@@ -46,6 +52,16 @@ final class SourceMaintenance {
             int z) {}
 
     SourceMaintenance(ServerLodEngine engine, Path journal, long quietMillis, long cooldownMillis) {
+        this(engine, journal, quietMillis, cooldownMillis, () -> {});
+    }
+
+    SourceMaintenance(
+            ServerLodEngine engine,
+            Path journal,
+            long quietMillis,
+            long cooldownMillis,
+            Runnable wake) {
+        this.wake = wake;
         this.engine = engine;
         this.journal = journal;
         dirty =
@@ -58,15 +74,42 @@ final class SourceMaintenance {
         dirty.mark(level, x, y, z, System.nanoTime());
     }
 
+    void markColumn(ServerLevel level, LevelChunk chunk) {
+        if (stopped) return;
+        var heightmap = net.minecraft.world.level.levelgen.Heightmap.Types.WORLD_SURFACE;
+        // getHeight would prime a missing heightmap by scanning terrain on the caller thread.
+        int surface =
+                chunk.hasPrimedHeightmap(heightmap)
+                        ? chunk.getHeight(heightmap, 8, 8)
+                        : level.getSeaLevel();
+        for (int y = chunk.getMinSectionY(); y < chunk.getMaxSectionY(); y++) {
+            long root =
+                    WorldEngine.getWorldSectionId(
+                            4, chunk.getPos().x() >> 5, y >> 5, chunk.getPos().z() >> 5);
+            if (y == chunk.getMinSectionY() || (y & 31) == 0)
+                surfaces.put(new Root(level, root), surface);
+            mark(level, chunk.getPos().x() << 4, y << 4, chunk.getPos().z() << 4);
+        }
+    }
+
+    private int surfaceY(ServerLevel level, long root) {
+        Integer observed = surfaces.get(new Root(level, root));
+        return observed == null ? level.getSeaLevel() : observed;
+    }
+
     boolean step(MinecraftServer server) {
         if (stopped) return false;
         if (active == null) {
-            active = dirty.poll(System.nanoTime());
+            active = dirty.poll(System.nanoTime(), this::surfaceY);
             if (active == null) return false;
             snapshotStarted = System.nanoTime();
             snapshot = new CompletableFuture<>();
             var work = active;
             var result = snapshot;
+            result.whenComplete(
+                    (unused, error) -> {
+                        if (!stopped) wake.run();
+                    });
             server.execute(
                     () -> {
                         if (stopped || result.isDone()) {
@@ -304,6 +347,7 @@ final class SourceMaintenance {
         if (snapshot != null) snapshot.cancel(false);
         clearActive();
         dirty.clear();
+        surfaces.clear();
     }
 
     void resume(Map<String, ServerLevel> levels) {

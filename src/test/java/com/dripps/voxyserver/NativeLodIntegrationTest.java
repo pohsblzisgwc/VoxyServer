@@ -84,6 +84,7 @@ public final class NativeLodIntegrationTest {
             Class.forName(name, false, NativeLodIntegrationTest.class.getClassLoader());
         var registry = biomes();
         snapshotLockSwitch(registry);
+        NativeHierarchyTest.run();
         var server = new WorldEngine(new MemoryStorage());
         var client = new WorldEngine(new MemoryStorage());
         configure(server);
@@ -273,7 +274,7 @@ public final class NativeLodIntegrationTest {
             }
             System.out.println(
                     "PASS native global-switch writer guard: enabled writers synchronize; disabled"
-                        + " writers bypass the extra monitor");
+                            + " writers bypass the extra monitor");
         } finally {
             configField.set(null, saved);
         }
@@ -291,6 +292,12 @@ public final class NativeLodIntegrationTest {
         } finally {
             section.release();
         }
+    }
+
+    static WorldEngine memoryWorld() {
+        var world = new WorldEngine(new MemoryStorage());
+        configure(world);
+        return world;
     }
 
     private static void configure(WorldEngine world) {

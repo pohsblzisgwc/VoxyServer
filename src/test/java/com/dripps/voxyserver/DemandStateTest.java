@@ -97,9 +97,45 @@ public final class DemandStateTest {
         leaseRace();
         fairness();
         clientRecovery();
+        var local = new ClientDemandState();
+        local.wanted = 3;
+        local.coverage = 3;
+        local.beginLocalProof();
+        local.observeLocalPresence(1, true);
+        local.observeLocalPresence(0, false);
+        long[] cached = new long[64];
+        cached[1] = 42;
+        var same = new DemandProofState(9001, 3);
+        require(
+                local.localCoverage == 2
+                        && same.summary(
+                                        2,
+                                        1,
+                                        cached,
+                                        local.localCoverage,
+                                        DemandGroup.digest(local.localCoverage, cached),
+                                        true)
+                                == LODDemandReplyPayload.MATCH,
+                "first local cache proof omitted actual presence and forced retransmission");
+        local.beginLocalProof();
+        local.observeLocalPresence(1, false);
+        require(
+                local.localCoverage == 0 && local.coverage == 3,
+                "local deletion retained stale coverage or overwrote server scope");
+        var missingLocal = new DemandProofState(9002, 3);
+        require(
+                missingLocal.summary(
+                                2,
+                                1,
+                                cached,
+                                local.localCoverage,
+                                DemandGroup.digest(0, cached),
+                                true)
+                        == LODDemandReplyPayload.DIFFERENT,
+                "deleted local content incorrectly matched");
         System.out.println(
                 "PASS DemandStateTest: H1/H2, deletion/absence, replay, late ACK, credits, lease"
-                    + " race and fair admission");
+                        + " race and fair admission");
     }
 
     private static void clientRecovery() {

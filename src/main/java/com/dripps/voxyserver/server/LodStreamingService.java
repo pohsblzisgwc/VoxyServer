@@ -49,6 +49,7 @@ public final class LodStreamingService {
     private long sentNodes, summaryMatches, detailRequests, requestsRejected;
     private boolean started, preferIndex;
     private volatile boolean closed;
+    private final com.dripps.voxyserver.util.CoalescedWakeup sourceWake;
     private long lastLeaseSweep, workTurn, lastCheckpoint;
     private volatile long workerCpuNanos, workerWallNanos, workerCycles, maxQuantumNanos;
     private final java.lang.management.ThreadMXBean cpu =
@@ -102,6 +103,13 @@ public final class LodStreamingService {
         volatile Identifier dimension;
         long rateWindow;
         int rateUsed;
+        long requestsSeen,
+                rateRejected,
+                rangeRejected,
+                queueRejected,
+                sourcePendingReplies,
+                detailReplies,
+                sentNodes;
 
         State(UUID id) {
             this.id = id;
@@ -111,12 +119,15 @@ public final class LodStreamingService {
     public LodStreamingService(ServerLodEngine engine, VoxyServerConfig config) {
         this.engine = engine;
         this.config = config;
+        sourceWake =
+                new com.dripps.voxyserver.util.CoalescedWakeup(worker, this::cycle, () -> closed);
         source =
                 new SourceMaintenance(
                         engine,
                         engine.maintenanceJournal(),
                         config.maintenanceQuietMillis,
-                        config.maintenanceCooldownMillis);
+                        config.maintenanceCooldownMillis,
+                        this::wakeWorker);
         engine.setDirtySectionListener(
                 (dimension, key) -> {
                     index.invalidate(dimension, key);
@@ -246,6 +257,7 @@ public final class LodStreamingService {
 
     private void receive(ServerPlayer player, LODDemandPayload p) {
         State state = players.get(player.getUUID());
+        if (state != null) state.requestsSeen++;
         if (state == null
                 || !state.tracker.isReady()
                 || !state.tracker.isProtocolOk()
@@ -259,6 +271,7 @@ public final class LodStreamingService {
                 state.rateUsed = 0;
             }
             if (state.rateUsed >= config.maxDemandRequestsPerSecond) {
+                state.rateRejected++;
                 requestsRejected++;
                 return;
             }
@@ -275,6 +288,7 @@ public final class LodStreamingService {
                                 radius,
                                 player.level().getMinY(),
                                 player.level().getMaxY())) {
+                    state.rangeRejected++;
                     requestsRejected++;
                     reply(state, p, LODDemandReplyPayload.REJECTED, 0, 0, 0);
                     return;
@@ -288,6 +302,7 @@ public final class LodStreamingService {
                         p,
                         world,
                         player.level().registryAccess().lookupOrThrow(Registries.BIOME)))) {
+            state.queueRejected++;
             requestsRejected++;
             reply(state, p, LODDemandReplyPayload.PENDING, 0, 0, 0);
         }
@@ -339,6 +354,7 @@ public final class LodStreamingService {
         }
         DemandIndex.Proof proof = index.proof(p.dimension(), p.group(), p.wanted());
         if (proof == null) {
+            state.sourcePendingReplies++;
             for (int i = 0; i < 64; i++)
                 if ((p.wanted() & (1L << i)) != 0) {
                     long key = DemandGroup.node(p.group(), i);
@@ -393,7 +409,10 @@ public final class LodStreamingService {
                         invalidate(state, p.group(), gate);
                         return;
                     }
-                    if (!alreadyDetailed) detailRequests++;
+                    if (!alreadyDetailed) {
+                        detailRequests++;
+                        state.detailReplies++;
+                    }
                     reply(state, p, status, gate.coverage, gate.revision, gate.needed);
                     schedule(state, p.group(), gate);
                 }
@@ -633,6 +652,10 @@ public final class LodStreamingService {
                 });
     }
 
+    private void wakeWorker() {
+        sourceWake.request();
+    }
+
     private void cycle() {
         if (closed || server == null) return;
         long cycleStarted = System.nanoTime(),
@@ -803,6 +826,7 @@ public final class LodStreamingService {
                             queue.pollNext();
                             ServerPlayNetworking.send(player, packet.payload());
                             sentNodes += packet.payload().sectionCount();
+                            state.sentNodes += packet.payload().sectionCount();
                             sent += packet.payload().sectionCount();
                         }
                     }
@@ -856,6 +880,19 @@ public final class LodStreamingService {
 
     public int pendingSourceSections() {
         return source.dirty.dirtyCells();
+    }
+
+    public long sourceUpdates() {
+        return source.updates;
+    }
+
+    public long sentNodeCount() {
+        return sentNodes;
+    }
+
+    public void markSourceColumn(
+            ServerLevel level, net.minecraft.world.level.chunk.LevelChunk chunk) {
+        if (!closed) source.markColumn(level, chunk);
     }
 
     public void markSourceDirty(ServerLevel level, int blockX, int blockY, int blockZ) {
@@ -957,13 +994,15 @@ public final class LodStreamingService {
                                     p == null ? 0 : p.getBlockX() >> 4,
                                     p == null ? 0 : p.getBlockZ() >> 4));
                 });
+        long loaded = 0;
+        for (var level : s.getAllLevels()) loaded += level.getChunkSource().getLoadedChunksCount();
         return new StreamingStats(
                 players.size(),
                 index.size(),
                 index.size(),
                 source.dirty.dirtyCells(),
                 index.pending(),
-                0,
+                (int) Math.min(Integer.MAX_VALUE, loaded),
                 stats);
     }
 
@@ -998,8 +1037,20 @@ public final class LodStreamingService {
                 (id, state) -> {
                     var q = BandwidthThrottler.INSTANCE.getQueue(id);
                     Voxyserver.LOGGER.info(
-                            "demand player {} {} queue={}",
+                            "demand player {} ready={} protocolOk={} enabled={} requests={}"
+                                + " pendingReplies={} details={} sentNodes={} rateRejected={}"
+                                + " rangeRejected={} queueRejected={} {} queue={}",
                             id,
+                            state.tracker.isReady(),
+                            state.tracker.isProtocolOk(),
+                            state.tracker.isLodEnabled(),
+                            state.requestsSeen,
+                            state.sourcePendingReplies,
+                            state.detailReplies,
+                            state.sentNodes,
+                            state.rateRejected,
+                            state.rangeRejected,
+                            state.queueRejected,
                             state.tracker.syncStats(),
                             q == null ? null : q.stats());
                 });

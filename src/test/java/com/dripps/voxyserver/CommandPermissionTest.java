@@ -26,6 +26,8 @@ public final class CommandPermissionTest {
             "voxyserver config set enabled false",
             "voxyserver reload",
             "voxyserver config list",
+            "voxyserver config reset",
+            "voxyserver config reset maintenanceMillisPerSecond",
             "voxyserver config get backgroundGenerationChunksPerMinute",
             "voxyserver config set backgroundGenerationChunksPerMinute 600000",
             "voxyserver config reload",

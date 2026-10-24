@@ -45,6 +45,9 @@ public final class RemoteIngestService {
     private volatile Identifier activeDimension;
     private volatile long activeEpoch;
     private volatile boolean live = true;
+    // Ingest worker only. Report on activity; no diagnostic timer/thread.
+    private long installedBatches,lastInstallReport;
+    private final long[] installedByLod=new long[5];
 
     private final class IngestTask implements Runnable {
         private final WorldIdentifier worldId;
@@ -217,6 +220,18 @@ public final class RemoteIngestService {
             if (!isCurrent(task)) return LODBatchResultPayload.STALE;
             if (!ClientLodHashStore.get().recordBatch(task.hashStoreKey, keys, hashes)) {
                 return LODBatchResultPayload.FAILURE;
+            }
+            installedBatches++;
+            int minY=Integer.MAX_VALUE,maxY=Integer.MIN_VALUE;
+            for(var section:bulk.sections()) {
+                int level=WorldEngine.getLevel(section.sectionKey());installedByLod[level]++;
+                int y=WorldEngine.getY(section.sectionKey())*(32<<level);
+                minY=Math.min(minY,y);maxY=Math.max(maxY,y+(32<<level));
+            }
+            long now=System.nanoTime();
+            if(installedBatches==1 || now-lastInstallReport>=10_000_000_000L) {
+                lastInstallReport=now;
+                Logger.info("remote LOD installed: batches="+installedBatches+" nodesByLod="+java.util.Arrays.toString(installedByLod)+" recentBlockY="+minY+".."+maxY);
             }
             return LODBatchResultPayload.SUCCESS;
         } finally {

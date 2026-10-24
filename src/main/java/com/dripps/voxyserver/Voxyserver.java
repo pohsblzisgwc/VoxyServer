@@ -184,7 +184,7 @@ public class Voxyserver implements ModInitializer {
             return; // No counters, clocks, disk polling or scheduled jobs while disabled.
         r.background().tick();
         r.streaming().onTick(server);
-        r.stats().tick(server);
+        r.stats().tick(server, r.streaming().sourceUpdates(), r.streaming().sentNodeCount());
         if (++configCheckCounter >= 20) {
             configCheckCounter = 0;
             checkConfigReload();

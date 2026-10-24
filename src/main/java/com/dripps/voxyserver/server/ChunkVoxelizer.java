@@ -38,9 +38,7 @@ public final class ChunkVoxelizer {
     }
 
     private void mark(ServerLevel level, LevelChunk chunk) {
-        for (int y = chunk.getMinSectionY(); y < chunk.getMaxSectionY(); y++)
-            streaming.markSourceDirty(
-                    level, chunk.getPos().x() << 4, y << 4, chunk.getPos().z() << 4);
+        streaming.markSourceColumn(level, chunk);
     }
 
     public void shutdown() {}

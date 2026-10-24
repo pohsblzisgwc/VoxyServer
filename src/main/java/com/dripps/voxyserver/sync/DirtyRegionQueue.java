@@ -75,7 +75,25 @@ public final class DirtyRegionQueue<D> {
         }
     }
 
+    @FunctionalInterface
+    public interface HeightPreference<D> {
+        int blockY(D dimension, long rootKey);
+    }
+
+    private long priorityTurns;
+
     public Work<D> poll(long now) {
+        return pollInternal(now, null);
+    }
+
+    /** Four surface turns then one ordinary turn; deep sources retain a bounded share. */
+    public Work<D> poll(long now, HeightPreference<D> preference) {
+        if ((priorityTurns++ % 5) == 4) return pollInternal(now, null);
+        var result = pollInternal(now, preference);
+        return result != null ? result : pollInternal(now, null);
+    }
+
+    private Work<D> pollInternal(long now, HeightPreference<D> preference) {
         for (int i = 0; i < 128; i++) {
             var e = incoming.poll();
             if (e == null) break;
@@ -89,50 +107,66 @@ public final class DirtyRegionQueue<D> {
             if (roots.get(root) != b) continue;
             BitSet pending;
             long version;
+            int preferredY =
+                    preference == null
+                            ? (WorldEngine.getY(root.key) << 9)
+                            : preference.blockY(root.dimension, root.key);
             synchronized (b) {
                 if (b.dirty.isEmpty() && now - b.last >= cooldownNanos) {
                     roots.remove(root, b);
                     continue;
                 }
                 turns.addLast(entry);
+                if (preference != null && (preferredY >> 9) != WorldEngine.getY(root.key)) continue;
                 if (now < b.nextPoll || now < Math.min(b.last + quietNanos, b.first + maxWaitNanos))
                     continue;
                 pending = (BitSet) b.dirty.clone();
                 version = b.version; // <=4 KiB, no scan under the source writer's monitor.
             }
             long next = Long.MAX_VALUE;
-            for (int i = pending.nextSetBit(0); i >= 0; i = pending.nextSetBit(i + 1)) {
-                int x = (i & 31) >> 1, y = (i >> 10) >> 1, z = ((i >> 5) & 31) >> 1;
-                long r = root.key,
-                        node =
-                                WorldEngine.getWorldSectionId(
-                                        0,
-                                        (WorldEngine.getX(r) << 4) + x,
-                                        (WorldEngine.getY(r) << 4) + y,
-                                        (WorldEngine.getZ(r) << 4) + z);
-                Work<D> cooldownKey = new Work<>(root.dimension, node, 0);
-                Long eligible = cooldowns.get(cooldownKey);
-                if (eligible != null && now < eligible) {
-                    next = Math.min(next, eligible);
-                    continue;
-                }
-                int mask = 0;
-                synchronized (b) {
-                    for (int slot = 0; slot < 8; slot++) {
-                        int source =
-                                (x * 2 + (slot & 1))
-                                        | ((z * 2 + ((slot >> 1) & 1)) << 5)
-                                        | ((y * 2 + (slot >> 2)) << 10);
-                        if (b.dirty.get(source)) {
-                            mask |= 1 << slot;
-                            b.dirty.clear(source);
-                        }
+            for (int rank = 0; rank < (preference == null ? 1 : 16); rank++) {
+                int pair =
+                        preference == null
+                                ? rank
+                                : SourceSectionOrder.pairAt(
+                                        (preferredY >> 5) - (WorldEngine.getY(root.key) << 4),
+                                        rank);
+                int end = preference == null ? 32768 : (pair + 1) << 11;
+                for (int i = pending.nextSetBit(preference == null ? 0 : pair << 11);
+                        i >= 0 && i < end;
+                        i = pending.nextSetBit(i + 1)) {
+                    int x = (i & 31) >> 1, y = (i >> 10) >> 1, z = ((i >> 5) & 31) >> 1;
+                    long r = root.key,
+                            node =
+                                    WorldEngine.getWorldSectionId(
+                                            0,
+                                            (WorldEngine.getX(r) << 4) + x,
+                                            (WorldEngine.getY(r) << 4) + y,
+                                            (WorldEngine.getZ(r) << 4) + z);
+                    Work<D> cooldownKey = new Work<>(root.dimension, node, 0);
+                    Long eligible = cooldowns.get(cooldownKey);
+                    if (eligible != null && now < eligible) {
+                        next = Math.min(next, eligible);
+                        continue;
                     }
-                    count.addAndGet(-Integer.bitCount(mask));
+                    int mask = 0;
+                    synchronized (b) {
+                        for (int slot = 0; slot < 8; slot++) {
+                            int source =
+                                    (x * 2 + (slot & 1))
+                                            | ((z * 2 + ((slot >> 1) & 1)) << 5)
+                                            | ((y * 2 + (slot >> 2)) << 10);
+                            if (b.dirty.get(source)) {
+                                mask |= 1 << slot;
+                                b.dirty.clear(source);
+                            }
+                        }
+                        count.addAndGet(-Integer.bitCount(mask));
+                    }
+                    if (mask == 0) continue;
+                    cooldowns.put(cooldownKey, now + cooldownNanos);
+                    return new Work<>(root.dimension, node, mask);
                 }
-                if (mask == 0) continue;
-                cooldowns.put(cooldownKey, now + cooldownNanos);
-                return new Work<>(root.dimension, node, mask);
             }
             synchronized (b) {
                 if (b.version == version) b.nextPoll = next;

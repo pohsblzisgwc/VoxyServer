@@ -6,7 +6,7 @@ a fabric server side mod that voxelizes chunks into LODs using [voxy](https://gi
 
 ## how it works
 
-Release **v1.2.8** uses **protocol 5** on Fabric / Minecraft 26.3. Both sides must update together. Published `v1.2.5` (`4deea7a`) is unchanged.
+Release **v1.2.9** uses **protocol 5** on Fabric / Minecraft 26.3. Both sides must update together. Published `v1.2.5` (`4deea7a`) is unchanged.
 
 The client derives demand from Voxy's actual render subscriptions at native LOD levels **0–4**. Each node contains 32³ voxels and spans `32 << level` blocks. Voxy's `sectionRenderDistance` uses **512-block top-level units**: values 16 and 32 mean 512 and 1024 Minecraft chunks. The remote range is capped by the native view, personal preference and server maximum. The server validates the requested coordinates, dimension, epoch and rate without enumerating the view grid or the database.
 
@@ -119,7 +119,7 @@ Old `tickInterval`, `dirtyTrackingInterval`, `enableDistancePacing`, `enableRegi
 
 Configuration is validated before application or saving. Invalid startup files produce field-specific diagnostics and use validated defaults without overwriting the file. Invalid reloads retain the current validated configuration; commands and saves use the same validation guard. Changing chunk lifecycle generation flags or enabling/disabling dirty tracking still requires a runtime restart (disable, then enable) or server restart.
 
-In v1.2.8 all defaults stay unchanged. Workload/timing integer settings now accept positive 32-bit values (up to 2,147,483,647); bandwidth, quiet/cooldown times and background delay/hold/backlog/history/recheck accept zero as documented. Generation starts accept 1..600000 per minute. The view protocol still limits radius to 4096, packets to 16 nodes, and queues retain their byte/packet caps. Voxy service threads accept 1..10000 because the native pool's shutdown releases 10000 permits. These technical bounds remain enforced.
+In v1.2.9 all defaults stay unchanged. Workload/timing integer settings now accept positive 32-bit values (up to 2,147,483,647); bandwidth, quiet/cooldown times and background delay/hold/backlog/history/recheck accept zero as documented. Generation starts accept 1..600000 per minute. The view protocol still limits radius to 4096, packets to 16 nodes, and queues retain their byte/packet caps. Voxy service threads accept 1..10000 because the native pool's shutdown releases 10000 permits. These technical bounds remain enforced.
 
 ### global runtime switch
 
@@ -135,7 +135,26 @@ Disabling detaches event/network admission first, releases owned generation tick
 
 While disabled there are **no VoxyServer background jobs, hash scans, world generation, data streams, periodic config reads or update requests** on the server. Classes, commands, payload registration and constant-time event/null checks (plus a pause reply to an explicit handshake) still occupy a small amount of memory/CPU: a loaded, reversible mod cannot honestly promise literal zero resources. Already dispatched shared vanilla generation/I/O may finish; it is not forcibly interrupted. One-time draining/checkpoint/notification work is part of shutdown. Unfinished native generation/probe futures retain lightweight concurrency debt across disable/re-enable. Rate credit/minute usage also survives runtime replacement, so toggling cannot mint extra starts. Completion callbacks release it without a polling thread, and the next runtime admits no replacement work beyond the configured concurrency until it drains. This switch controls VoxyServer's server runtime, not ordinary client Voxy rendering/cache ownership.
 
-Because disabled mode does not poll the filesystem, re-enable with the command, or edit the file and run `/voxyserver reload`, or restart the server. Re-enabling recreates services and gives compatible **v1.2.8 clients** a new handshake/session without erasing their stored terrain. Protocol 5's existing integer advertisement uses `0` to pause and the matching version to resume; the wire layout stays unchanged. Older clients may need to reconnect after re-enable. Stored LOD/dirty journals remain on disk. Block changes made while the mod is completely off are not recorded or retroactively rebuilt; later chunk load/unload updates, imports or newly marked source work refresh that terrain. No full-world scan runs on re-enable. Singleplayer/LAN runtime support is unchanged.
+Because disabled mode does not poll the filesystem, re-enable with the command, or edit the file and run `/voxyserver reload`, or restart the server. Re-enabling recreates services and gives compatible **v1.2.9 clients** a new handshake/session without erasing their stored terrain. Protocol 5's existing integer advertisement uses `0` to pause and the matching version to resume; the wire layout stays unchanged. Older clients may need to reconnect after re-enable. Stored LOD/dirty journals remain on disk. Block changes made while the mod is completely off are not recorded or retroactively rebuilt; later chunk load/unload updates, imports or newly marked source work refresh that terrain. No full-world scan runs on re-enable. Singleplayer/LAN runtime support is unchanged.
+
+### restore default server configuration
+
+```text
+/voxyserver config reset
+/voxyserver config reset maintenanceMillisPerSecond
+```
+
+The first command resets all server options; the second resets only the named option. Both require `COMMANDS_ADMIN`, validate before applying and save the result. Radius aliases reset together. An individual reset that conflicts with another setting (for example resetting the stop MSPT below a custom start MSPT) is rejected; reset both settings or use the full reset. Full reset restores `enabled=true`, background generation off, generation rate 6/minute, and the documented defaults for budgets/bandwidth. Chunk lifecycle/dirty-hook changes report when a runtime restart is required. Reset changes configuration only and preserves world, client cache, LOD storage, journals and import progress.
+
+### native hierarchy, startup and surface delivery (v1.2.9)
+
+Remote node installation now applies Voxy's original `Mipper` reduction to the affected 16³ octant of each ancestor through LOD4. Parent occupancy and block/child update events are propagated, and changed nodes notify all six same-level neighbors for remeshing. Sibling octants and independently acquired finer nodes are preserved. Earlier versions overwrote only the received node, which could leave missing/stale parent data even after a successful ACK. Native ocean/stone tests compare every parent voxel and child mask with original Voxy `WorldUpdater` output, including negative coordinates, adjacent nodes and air replacement. This restores native data/update behavior; it is not a claim of GPU-verified seamless rendering or a new smoothing algorithm.
+
+Source maintenance now prioritizes layers near an already loaded chunk's surface height, falling back to sea level when a primed heightmap is unavailable. It never primes a heightmap on the Minecraft thread. Four priority turns alternate with one ordinary FIFO turn, so deep work continues. Work selection stays bounded; it does not traverse a player-sized area or the database. Source capture completion coalesces a wake on the existing worker rather than waiting for the next 50 ms timer. Conversion/hashing/encoding still share the configured global allowance; no extra worker or main-thread conversion is introduced. Loaded/unloaded chunks still enqueue their full source height, and durable per-source freshness stamps remain unimplemented; this release improves ordering and scheduling, not an unconditional elimination of repeat ingestion.
+
+Client SUMMARY proofs now report the actual locally present node mask, including on the first audit; DETAIL retains the server-advertised comparison range. Sessions arriving before the client world/player/identifier is ready are retained and retried on client ticks instead of being dropped. Update both client and server to v1.2.9 for these changes; the observed v1.2.6 client lacks them. Wire protocol remains 5 and semantic hashes retain the same definition.
+
+`/voxyserver stats` now labels real `sourceSections` and `sentNodes` and reports the loaded-chunk count instead of fixed zero. Periodic diagnostics use these actual counters. Per-player debug lines show handshake/protocol/enabled state, request/pending/detail/send counts and separate rate/range/queue rejections. Clients log `remote LOD session active` and activity-limited `remote LOD installed` summaries (nodes by LOD and the latest batch's block-Y range). Successful ACK means validation/installation completed; it does not prove a GPU frame was rendered. These logs do not add a diagnostic polling thread.
 
 ### maintenance and memory
 
@@ -147,7 +166,7 @@ The index holds at most **65,536 node fingerprints**, **128 encoded node snapsho
 
 Dirty work, including the active item, is journaled about every 30 seconds and on a clean stop. Startup merges it with newly loaded source work. A crash can lose the latest uncheckpointed dirty window, and Voxy's asynchronous storage writes are not a world-wide atomic checkpoint. Normal chunk loads queue source verification again. Existing loaded chunks may therefore incur bounded repeated ingestion after reconnect/reload; this implementation does not persist per-source freshness stamps or scan/rebuild the whole map.
 
-A nonpreemptible node/source operation may finish beyond the configured worker allowance; that allowance is not a hard CPU/TPS guarantee. Main-thread captures, Voxy's own compression/save workers, manual imports and periodic journal/lease metadata are additional costs. Debug logs expose worker CPU/wall time, maximum work quantum, main capture time, hashes/cache hits, matched groups, actual sends, retries/ACK timeouts and per-player queue peaks/rejections/evictions. Saturated budgets delay convergence rather than moving heavy work onto the main thread.
+A nonpreemptible node/source operation may finish beyond the configured worker allowance; that allowance is not a hard CPU/TPS guarantee. Main-thread captures, Voxy's own compression/save workers, manual imports and periodic journal/lease metadata are additional costs. Debug logs expose worker CPU/wall time, maximum work quantum, main capture time, hashes/cache hits, matched groups, actual sends, retries/ACK timeouts and per-player queue peaks/rejections/evictions, plus per-player request/protocol and rejection-reason counters. Saturated budgets delay convergence rather than moving heavy work onto the main thread.
 
 ### optional background generation
 
@@ -201,13 +220,17 @@ The scheduler regression simulates 1,200 ticks with concurrent jobs and a high-M
 
 ### 中文命令速查
 
-**v1.2.8 限额调整：默认仍为每分钟 6 个目标，允许范围扩大到 1–600000。** 并发、候选数、调度预算、半径和等待时间等策略上限已放宽；允许的最大整数为 2147483647。实际吞吐仍同时受并发、候选检查间隔、候选数、调度预算和 MSPT 限制。只提高每分钟额度不会自动提高其他设置。服务端不保证真实生成能达到配置上限。
+**v1.2.9 限额调整：默认仍为每分钟 6 个目标，允许范围扩大到 1–600000。** 并发、候选数、调度预算、半径和等待时间等策略上限已放宽；允许的最大整数为 2147483647。实际吞吐仍同时受并发、候选检查间隔、候选数、调度预算和 MSPT 限制。只提高每分钟额度不会自动提高其他设置。服务端不保证真实生成能达到配置上限。
 
 所有 `/voxyserver` 命令（含 help、查询、stats、导入与修改）统一由服务端检查 `COMMANDS_ADMIN` 权限，对应原版权限等级 3 或更高。客户端提交命令不能绕过检查；普通玩家的远景需求协议仍可正常使用。
 
-以下命令适用于 **v1.2.8 / 协议 5**。游戏内需要管理员权限；在服务器控制台执行时，去掉开头的 `/`。下列命令调整的是服务端行为，客户端与服务端仍需使用兼容的协议版本。
+以下命令适用于 **v1.2.9 / 协议 5**。游戏内需要管理员权限；在服务器控制台执行时，去掉开头的 `/`。下列命令调整的是服务端行为，客户端与服务端仍需使用兼容的协议版本。
 
 #### 查看、修改、保存与重载
+
+**v1.2.9 修复收包与显示链路：** 远程节点更新按原版 Voxy 向父级执行 mip、更新子节点存在状态并触发相邻节点刷新；源维护优先地表，同时保留地下的普通轮转机会。快照完成唤醒既有维护线程，仍受原预算限制。客户端首轮摘要使用真实本地覆盖范围，世界未就绪时保留会话重试。客户端和服务端都应更新；旧版 v1.2.6 不包含这些修复。已通过原生数据与事件对照测试，未在真实 GPU 画面和这套整合包上验证接缝表现。
+
+恢复本轮临时调高的所有配置，可执行 `/voxyserver config reset`；只恢复一项可执行 `/voxyserver config reset maintenanceMillisPerSecond`。恢复默认配置不会清空世界或 LOD 数据。全部恢复会把总开关设为 `true`、旁路生成设为 `false`；需要重启运行实例才能生效的项会给出提示。
 
 总开关默认开启，关闭和恢复使用：
 
@@ -219,10 +242,12 @@ The scheduler regression simulates 1,200 ticks with concurrent jobs and a high-M
 
 分别为完全停止服务端运行实例、重新创建实例、查询开关。等价配置项是 `enabled`，例如 `/voxyserver config set enabled false`。关闭会收尾导入、保存待维护日志、停止自有线程、清空运行队列并释放自有票据；客户端已有地形和服务端磁盘数据保留。关闭期间不自动检查配置文件，也不检查更新；编辑配置后需手动 `/voxyserver reload` 才能恢复。
 
-这里“完全关闭”指没有模组后台任务和数据流。已加载的类、管理命令与事件入口仍有少量常驻内存和判断成本；原版已派发的共享任务不能强杀。关闭命令会等待自有任务和存储收尾，不承诺零耗时。关闭期间发生的方块变化不会被记录，恢复时不全图回扫；相关数据会随后续源更新或管理员导入刷新。全服速率额度和本分钟已用量也跨开关保留，不能靠反复开关获得额外启动额度。关闭前尚未完成的原版生成/探测 Future 保留轻量并发占用，完成回调自动释放，不另开轮询线程；立即重开也不会绕过并发上限。在线恢复建议两端使用 v1.2.8，旧客户端可能需要重连。集成端支持保持原样。
+这里“完全关闭”指没有模组后台任务和数据流。已加载的类、管理命令与事件入口仍有少量常驻内存和判断成本；原版已派发的共享任务不能强杀。关闭命令会等待自有任务和存储收尾，不承诺零耗时。关闭期间发生的方块变化不会被记录，恢复时不全图回扫；相关数据会随后续源更新或管理员导入刷新。全服速率额度和本分钟已用量也跨开关保留，不能靠反复开关获得额外启动额度。关闭前尚未完成的原版生成/探测 Future 保留轻量并发占用，完成回调自动释放，不另开轮询线程；立即重开也不会绕过并发上限。在线恢复建议两端使用 v1.2.9，旧客户端可能需要重连。集成端支持保持原样。
 
 | 命令 | 作用 |
 |------|------|
+| `/voxyserver config reset` | 恢复全部服务端配置为默认值并保存；包括总开关开启、旁路生成关闭、速率恢复 6/分钟，不删除任何地形或缓存 |
+| `/voxyserver config reset maintenanceMillisPerSecond` | 只恢复指定项；可替换选项名。单项恢复若违反跨字段关系会拒绝应用，半径别名同步恢复 |
 | `/voxyserver config list` | 列出全部配置、当前值，以及是否需要重启 |
 | `/voxyserver config get backgroundGenerationEnabled` | 查询某一项；把末尾选项名替换为下表任意选项即可 |
 | `/voxyserver config set <选项名> <值>` | 修改配置，校验通过后立即保存到 `config/voxyserver.json`；可热更新的选项同时生效，不必再执行 reload |
@@ -391,7 +416,7 @@ Run with JDK 25 and the compatible Voxy jar in `libs/`:
 ./scripts/test-semantic-sync.sh
 ```
 
-The **16 standalone suites** include proof changes/deletions, duplicate/out-of-order messages, late ACKs, timeout recovery, range isolation, fair bounded mailboxes, source quiet/cooldown/retry/journal behavior, invalidation races, configuration boundaries, semantic registry differences and queue saturation. Both Fabric pre-launch checks apply the real server/client mixins and exercise real Voxy worlds/mappers, native ingest, missing-node placeholders, coarse/fine preservation and source-update locking. They exit before opening a world, network listener, renderer or display. The client check validates that the renderer mixin targets apply; it does not run the live render loop. Test-only classes/resources and the Sodium test runtime do not enter the release jar. Bundled LWJGL core/native versions match Minecraft 26.3's 3.4.3 to avoid a native-library mismatch.
+The **22 standalone suites** include proof changes/deletions, duplicate/out-of-order messages, late ACKs, timeout recovery, range isolation, fair bounded mailboxes, source quiet/cooldown/retry/journal behavior, invalidation races, configuration boundaries, semantic registry differences and queue saturation. Both Fabric pre-launch checks apply the real server/client mixins and exercise real Voxy worlds/mappers, native ingest, missing-node placeholders, coarse/fine preservation and source-update locking. They exit before opening a world, network listener, renderer or display. The client check validates renderer mixin targets and exercises the original Voxy update router with native hierarchy events; it does not run the live render loop. Test-only classes/resources and the Sodium test runtime do not enter the release jar. Bundled LWJGL core/native versions match Minecraft 26.3's 3.4.3 to avoid a native-library mismatch.
 
 Still unverified: background generation under real server load, a real multi-client Minecraft session, live renderer refinement and missing-parent behavior, sustained TPS and storage throughput on a large explored map, latency while large ingest backlogs drain, and actual total bandwidth savings. User file replacement under a running server is unsupported. Fixed cache/subscription limits may cause extra revalidation in very large/dispersed views. The first connection and cold caches can converge slowly under deliberately low global budgets. Do not treat these results as production-safety or end-to-end certification.
 

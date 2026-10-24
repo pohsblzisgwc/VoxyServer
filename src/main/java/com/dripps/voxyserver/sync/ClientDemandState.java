@@ -11,6 +11,18 @@ import java.util.concurrent.ThreadLocalRandom;
 public class ClientDemandState {
     public static final int WAIT_DATA = 3;
     public final DemandLease lease = new DemandLease();
+    public long localCoverage;
+
+    public void beginLocalProof() {
+        localCoverage = 0;
+    }
+
+    public void observeLocalPresence(int slot, boolean present) {
+        if (slot < 0 || slot >= 64) throw new IllegalArgumentException("invalid local proof slot");
+        long bit = 1L << slot;
+        localCoverage = present ? localCoverage | bit : localCoverage & ~bit;
+    }
+
     public long wanted,
             coverage,
             revision,

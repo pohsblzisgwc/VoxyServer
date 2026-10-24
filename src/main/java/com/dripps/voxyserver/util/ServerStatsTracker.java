@@ -2,6 +2,7 @@ package com.dripps.voxyserver.util;
 
 import com.dripps.voxyserver.Voxyserver;
 import com.dripps.voxyserver.config.VoxyServerConfig;
+
 import net.minecraft.server.MinecraftServer;
 
 import java.util.concurrent.atomic.LongAdder;
@@ -46,18 +47,25 @@ public class ServerStatsTracker {
     }
 
     public void tick(MinecraftServer server) {
+        tick(server, chunksVoxelized.sum(), sectionsStreamed.sum());
+    }
+
+    public void tick(MinecraftServer server, long sourceUpdates, long sentNodes) {
         if (++this.ticks < this.tickInterval) return;
         this.ticks = 0;
 
-        long c = chunksVoxelized.sum();
-        long s = sectionsStreamed.sum();
+        long c = sourceUpdates;
+        long s = sentNodes;
         long e = engineActions.sum();
 
         VoxyServerConfig cfg = Voxyserver.getConfig();
         if (cfg != null && cfg.debugTrackingEnabled) {
             Voxyserver.LOGGER.info(
-                    "stats: chunks voxelized {} | sections streamed {} | engine actions {}",
-                    c - prevChunks, s - prevSections, e - prevEngine);
+                    "stats: source sections converted {} | native nodes sent {} | engine actions"
+                        + " {}",
+                    c - prevChunks,
+                    s - prevSections,
+                    e - prevEngine);
         }
 
         prevChunks = c;

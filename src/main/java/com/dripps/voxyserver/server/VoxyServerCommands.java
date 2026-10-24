@@ -74,6 +74,11 @@ public final class VoxyServerCommands {
                                 .then(Commands.argument("enabled", BoolArgumentType.bool())
                                         .executes(context -> setRegionHash(context.getSource(), mod, BoolArgumentType.getBool(context, "enabled")))))
                         .then(Commands.literal("config")
+                                .then(Commands.literal("reset")
+                                        .executes(context -> configReset(context.getSource(),mod,null))
+                                        .then(Commands.argument("key",StringArgumentType.string())
+                                                .suggests(KEY_SUGGEST)
+                                                .executes(context -> configReset(context.getSource(),mod,StringArgumentType.getString(context,"key")))))
                                 .then(Commands.literal("list")
                                         .executes(context -> configList(context.getSource())))
                                 .then(Commands.literal("reload")
@@ -270,6 +275,32 @@ public final class VoxyServerCommands {
         return 1;
     }
 
+    private static int configReset(CommandSourceStack source,Voxyserver mod,String key) {
+        var defaults=new VoxyServerConfig();
+        var current=Voxyserver.getConfig();
+        if(current==null){source.sendFailure(Component.literal("config not loaded"));return 0;}
+        var candidate=defaults;
+        if(key!=null) {
+            Field field=findConfigField(key);
+            if(field==null){source.sendFailure(Component.literal("unknown key: "+key));return 0;}
+            candidate=current.copy();
+            try{field.set(candidate,field.get(defaults));}catch(IllegalAccessException failure){throw new IllegalStateException(failure);}
+            if(key.equals("maxClientVoxyRadius") || key.equals("lodStreamRadius")) {
+                candidate.maxClientVoxyRadius=defaults.maxClientVoxyRadius;
+                candidate.lodStreamRadius=defaults.lodStreamRadius;
+            }
+        }
+        try {
+            candidate.requireValid();
+            var notes=mod.applyConfigFromCommand(candidate);
+            source.sendSuccess(()->Component.literal("[VoxyServer] restored "+(key==null?"all server settings":key)+" to defaults (saved & applied)"),true);
+            for(var note:notes)source.sendSuccess(()->Component.literal("note: "+note),false);
+            return 1;
+        } catch(IllegalArgumentException invalid) {
+            source.sendFailure(Component.literal("reset rejected: "+invalid.getMessage()));return 0;
+        }
+    }
+
     private static int configSet(CommandSourceStack source, Voxyserver mod, String key, String rawValue) {
         VoxyServerConfig current = Voxyserver.getConfig();
         Field f = findConfigField(key);
@@ -325,6 +356,7 @@ public final class VoxyServerCommands {
     private static int showHelp(CommandSourceStack source) {
         VoxyServerConfig cfg = Voxyserver.getConfig();
         MutableComponent out = Component.literal("=== VoxyServer Admin Commands ===").withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD);
+        out.append(Component.literal("\n/voxyserver config reset [key] - Restore all settings or one key to defaults").withStyle(ChatFormatting.YELLOW));
         out.append(Component.literal("\n/voxyserver enabled [true|false] - Start or fully stop the server runtime").withStyle(ChatFormatting.YELLOW));
         out.append(Component.literal("\n/voxyserver radius [chunks] ").withStyle(ChatFormatting.YELLOW))
                 .append(Component.literal("- Get or set client LOD view radius (1-4096)").withStyle(ChatFormatting.GRAY));
@@ -661,8 +693,8 @@ public final class VoxyServerCommands {
                 .append(kv("chunks", s.loadedChunks(), ChatFormatting.WHITE));
 
         out.append(Component.literal("\n"))
-                .append(kv("voxelized", counters.chunksVoxelized(), ChatFormatting.WHITE)).append(sep())
-                .append(kv("streamed", counters.sectionsStreamed(), ChatFormatting.WHITE)).append(sep())
+                .append(kv("sourceSections", mod.getStreamingService().sourceUpdates(), ChatFormatting.WHITE)).append(sep())
+                .append(kv("sentNodes", mod.getStreamingService().sentNodeCount(), ChatFormatting.WHITE)).append(sep())
                 .append(kv("engine", counters.engineActions(), ChatFormatting.WHITE));
 
         if (cfg != null) {
