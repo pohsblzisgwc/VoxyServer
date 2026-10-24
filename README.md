@@ -2,7 +2,7 @@
 
 Fabric / Minecraft **26.3** · Java **25** · Voxy **0.2.20-beta**
 
-**v1.3.0 使用协议 6，客户端和服务端必须一起升级。** 已发布的旧 tag 保持不变。服务端将已经拥有的地形转换成 Voxy LOD，客户端主动比较版本并请求所需的最高精度数据。
+**v1.3.1 使用协议 6，客户端和服务端必须一起升级。** 已发布的旧 tag 保持不变。服务端将已经拥有的地形转换成 Voxy LOD，客户端主动比较版本并请求所需的最高精度数据。
 
 ## 同步流程
 
@@ -51,7 +51,7 @@ Fabric / Minecraft **26.3** · Java **25** · Voxy **0.2.20-beta**
 
 服务端安装 Fabric API、兼容 Voxy 和本模组。客户端安装 Fabric API、Voxy、Sodium 和本模组。ModMenu 与 Cloth Config 可用于客户端设置界面。
 
-停止两端，移除旧 VoxyServer JAR，放入同一个 v1.3.0 运行 JAR 后重启。**保留世界、`.voxy` 缓存和现有 LOD 存储。** 协议 5 客户端不会接收协议 6 地形流。
+停止两端，移除旧 VoxyServer JAR，放入同一个 v1.3.1 运行 JAR 后重启。**保留世界、`.voxy` 缓存和现有 LOD 存储。** 协议 5 客户端不会接收协议 6 地形流。
 
 客户端个人设置位于 `config/voxyserver-client.json`，支持按服务器地址保存启用状态、远景半径和每 tick 数量偏好。有效范围取 Voxy 实际视距、个人设置和服务端上限。Voxy 的 `section_render_distance` 使用 512 方块顶层单位：16 对应 512 个 Minecraft 区块，32 对应 1024 个区块。
 
