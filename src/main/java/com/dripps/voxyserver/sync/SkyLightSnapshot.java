@@ -2,12 +2,36 @@ package com.dripps.voxyserver.sync;
 
 import net.minecraft.world.level.chunk.DataLayer;
 
+import java.util.Map;
 import java.util.function.IntBinaryOperator;
+import java.util.function.IntFunction;
 
-/** Missing skylight storage may inherit the first layer above; null does not itself mean zero. */
+/** Helpers for reconstructing effective sky light when Minecraft omits a uniform section layer. */
 public final class SkyLightSnapshot {
     private SkyLightSnapshot() {}
 
+    /**
+     * In Minecraft's sky light storage, a missing layer inherits the first stored layer above it.
+     * The y coordinate within the layer is preserved during that lookup. If no stored layer exists
+     * above, the sky light default is full skylight (15).
+     */
+    public static DataLayer inheritAbove(
+            int sectionY, int maxSectionY, IntFunction<DataLayer> layerAt) {
+        DataLayer inherited = null;
+        for (int y = sectionY + 1; y <= maxSectionY; y++) {
+            inherited = layerAt.apply(y);
+            if (inherited != null) break;
+        }
+        if (inherited == null) return new DataLayer(15);
+        return inherited.copy();
+    }
+
+    public static DataLayer inheritAbove(
+            int sectionY, int maxSectionY, Map<Integer, DataLayer> layers) {
+        return inheritAbove(sectionY, maxSectionY, layers::get);
+    }
+
+    /** Retained for callers which only have column samples. */
     public static DataLayer inherited(IntBinaryOperator effectiveColumnLight) {
         int[] columns = new int[256];
         int first = -1;

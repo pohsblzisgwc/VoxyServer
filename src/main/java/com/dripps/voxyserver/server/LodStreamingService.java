@@ -19,6 +19,7 @@ import net.minecraft.server.level.*;
 
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Full-range, client-led version reconciliation. Only final LOD0 delivery uses rate budgets. */
 public final class LodStreamingService {
@@ -39,6 +40,7 @@ public final class LodStreamingService {
                     });
     private final MaintenanceBudget workBudget = new MaintenanceBudget();
     private final CoalescedWakeup wake = new CoalescedWakeup(worker, this::cycle, () -> closed);
+    private final AtomicBoolean dirtyWakeScheduled = new AtomicBoolean();
     private final SourceMaintenance source;
     private long sentNodes,
             roundsCompleted,
@@ -702,19 +704,53 @@ public final class LodStreamingService {
         } finally {
             cycles++;
             workerNanos += System.nanoTime() - start;
+            scheduleDirtyWake();
         }
+    }
+
+    /**
+     * Queue one delayed worker turn while source work remains. Dirty work may be waiting for its
+     * quiet window, retry cooldown, or the next maintenance-budget window; none of those waits
+     * should depend on another client packet arriving.
+     */
+    private void scheduleDirtyWake() {
+        if (closed || server == null || !source.hasPendingWork()) return;
+        if (!dirtyWakeScheduled.compareAndSet(false, true)) return;
+        try {
+            worker.schedule(
+                    () -> {
+                        dirtyWakeScheduled.set(false);
+                        if (!closed && source.hasPendingWork()) wake.request();
+                    },
+                    1,
+                    TimeUnit.SECONDS);
+        } catch (RejectedExecutionException shuttingDown) {
+            dirtyWakeScheduled.set(false);
+        }
+    }
+
+    private void requestMaintenance() {
+        if (closed) return;
+        wake.request();
+        scheduleDirtyWake();
     }
 
     public void onTick(MinecraftServer server) {
         if (closed) return;
+        boolean firstServerTick = this.server == null;
         this.server = server;
         tick++;
+        if (firstServerTick) requestMaintenance();
         if (!resumed) {
             resumed = true;
             Map<String, ServerLevel> levels = new HashMap<>();
             for (var l : server.getAllLevels())
                 levels.put(l.dimension().identifier().toString(), l);
-            worker.execute(() -> source.resume(levels));
+            worker.execute(
+                    () -> {
+                        source.resume(levels);
+                        requestMaintenance();
+                    });
         }
         for (State s : players.values()) {
             var p = server.getPlayerList().getPlayer(s.id);
@@ -816,11 +852,17 @@ public final class LodStreamingService {
     }
 
     public void markSourceColumn(ServerLevel l, net.minecraft.world.level.chunk.LevelChunk c) {
-        if (!closed) source.markColumn(l, c, config.sourceColumnRecheckSeconds);
+        if (!closed) {
+            source.markColumn(l, c, config.sourceColumnRecheckSeconds);
+            requestMaintenance();
+        }
     }
 
     public void markSourceDirty(ServerLevel l, int x, int y, int z) {
-        if (!closed) source.mark(l, x, y, z);
+        if (!closed) {
+            source.mark(l, x, y, z);
+            requestMaintenance();
+        }
     }
 
     public void shutdown() {

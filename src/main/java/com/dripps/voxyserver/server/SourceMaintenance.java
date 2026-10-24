@@ -35,7 +35,7 @@ final class SourceMaintenance {
 
     private final com.dripps.voxyserver.util.BoundedLruCache<Root, Integer> surfaces =
             new com.dripps.voxyserver.util.BoundedLruCache<>(65536);
-    private DirtyRegionQueue.Work<ServerLevel> active;
+    private volatile DirtyRegionQueue.Work<ServerLevel> active;
     private CompletableFuture<List<Piece>> snapshot;
     private List<Piece> pieces;
     private int cursor;
@@ -43,6 +43,19 @@ final class SourceMaintenance {
     private volatile boolean stopped;
     volatile long updates, retries;
     long captureCount, captureNanos;
+    private long lastIncompleteLightingReport;
+    private long suppressedIncompleteLightingDeferrals;
+
+    private static final class IncompleteLightingException extends IOException {
+        final int chunkX;
+        final int chunkZ;
+
+        IncompleteLightingException(int chunkX, int chunkZ) {
+            super("stored source chunk has incomplete lighting: " + chunkX + "," + chunkZ);
+            this.chunkX = chunkX;
+            this.chunkZ = chunkZ;
+        }
+    }
 
     private record Piece(
             LevelChunkSection source,
@@ -74,6 +87,10 @@ final class SourceMaintenance {
     void mark(ServerLevel level, int x, int y, int z) {
         if (stopped) return;
         dirty.mark(level, x, y, z, System.nanoTime());
+    }
+
+    boolean hasPendingWork() {
+        return active != null || dirty.dirtyCells() != 0;
     }
 
     void markColumn(ServerLevel level, LevelChunk chunk, int recheckSeconds) {
@@ -192,8 +209,9 @@ final class SourceMaintenance {
                         DataLayer bl = p.block, sl = p.sky;
                         if (p.stored != null) {
                             bl = light(p.stored, "BlockLight");
-                            sl = light(p.stored, "SkyLight");
                         }
+                        if (sl == null)
+                            throw new IllegalStateException("effective skylight snapshot missing");
                         final DataLayer block = bl, sky = sl;
                         var vox =
                                 WorldConversionFactory.convert(
@@ -203,7 +221,7 @@ final class SourceMaintenance {
                                         biomes,
                                         (x, y, z) ->
                                                 (byte)
-                                                        ((sky == null ? 0 : sky.get(x, y, z))
+                                                        (sky.get(x, y, z)
                                                                 | ((block == null
                                                                                 ? 0
                                                                                 : block.get(
@@ -228,13 +246,43 @@ final class SourceMaintenance {
             if (cursor >= pieces.size()) clearActive();
         } catch (Exception e) {
             retries++;
-            dirty.retry(active, System.nanoTime());
+            long now = System.nanoTime();
+            Throwable cause = rootCause(e);
+            if (cause instanceof IncompleteLightingException incomplete) {
+                // This came from an unloaded region-file chunk. Re-reading its NBT cannot make
+                // lighting complete; the next chunk-load or light-update callback re-marks it.
+                reportIncompleteLighting(incomplete, now);
+            } else {
+                dirty.retry(active, now);
+                if (retries == 1 || retries % 100 == 0)
+                    Voxyserver.LOGGER.warn(
+                            "LOD maintenance deferred a source snapshot: {}", e.toString());
+            }
             clearActive();
-            if (retries == 1 || retries % 100 == 0)
-                Voxyserver.LOGGER.warn(
-                        "LOD maintenance deferred a source snapshot: {}", e.toString());
         }
         return true;
+    }
+
+    private void reportIncompleteLighting(IncompleteLightingException failure, long now) {
+        if (lastIncompleteLightingReport != 0
+                && now - lastIncompleteLightingReport < TimeUnit.SECONDS.toNanos(60)) {
+            suppressedIncompleteLightingDeferrals++;
+            return;
+        }
+        Voxyserver.LOGGER.warn(
+                "LOD maintenance skipped unlit saved chunks (latest {},{}); {} additional"
+                        + " snapshots skipped. They will be retried on chunk load or light update",
+                failure.chunkX,
+                failure.chunkZ,
+                suppressedIncompleteLightingDeferrals);
+        lastIncompleteLightingReport = now;
+        suppressedIncompleteLightingDeferrals = 0;
+    }
+
+    private static Throwable rootCause(Throwable error) {
+        Throwable cause = error;
+        while (cause.getCause() != null && cause.getCause() != cause) cause = cause.getCause();
+        return cause;
     }
 
     private static LevelChunkSection snapshotSection(LevelChunkSection source) {
@@ -278,16 +326,14 @@ final class SourceMaintenance {
                             var pos = SectionPos.of(x, y, z);
                             var block = bl.getDataLayerData(pos);
                             var sky = sl.getDataLayerData(pos);
-                            if (sky == null && !chunk.getSections()[index].hasOnlyAir()) {
-                                final int sourceY = y;
+                            if (sky == null) {
                                 sky =
-                                        com.dripps.voxyserver.sync.SkyLightSnapshot.inherited(
-                                                (lx, lz) ->
-                                                        sl.getLightValue(
-                                                                new net.minecraft.core.BlockPos(
-                                                                        (x << 4) + lx,
-                                                                        sourceY << 4,
-                                                                        (z << 4) + lz)));
+                                        com.dripps.voxyserver.sync.SkyLightSnapshot.inheritAbove(
+                                                y,
+                                                level.getMaxSectionY(),
+                                                candidateY ->
+                                                        sl.getDataLayerData(
+                                                                SectionPos.of(x, candidateY, z)));
                             }
                             list.add(
                                     new Piece(
@@ -319,27 +365,64 @@ final class SourceMaintenance {
                                                                                 + ","
                                                                                 + z));
                                                     var tag = optional.get();
+                                                    if (!tag.getBooleanOr("isLightOn", false))
+                                                        throw new CompletionException(
+                                                                new IncompleteLightingException(
+                                                                        x, z));
                                                     var sections =
                                                             tag.getList("sections").orElseThrow();
-                                                    var list = new ArrayList<Piece>();
+                                                    var sectionTags =
+                                                            new HashMap<Integer, CompoundTag>();
+                                                    var skyLayers =
+                                                            new HashMap<Integer, DataLayer>();
                                                     for (var value : sections)
                                                         if (value instanceof CompoundTag section) {
-                                                            int y =
+                                                            int sectionY =
                                                                     section.getIntOr(
                                                                             "Y", Integer.MIN_VALUE);
-                                                            if (y >= startY
-                                                                    && y < startY + 2
-                                                                    && (needed
-                                                                                    & (1
-                                                                                            << (sourceColumn
-                                                                                                    | ((y
-                                                                                                                    - startY)
-                                                                                                            << 2))))
-                                                                            != 0)
-                                                                list.add(
-                                                                        new Piece(
-                                                                                null, section, null,
-                                                                                null, x, y, z));
+                                                            if (sectionY != Integer.MIN_VALUE) {
+                                                                sectionTags.put(sectionY, section);
+                                                                DataLayer layer =
+                                                                        light(section, "SkyLight");
+                                                                if (layer != null)
+                                                                    skyLayers.put(sectionY, layer);
+                                                            }
+                                                        }
+                                                    var list = new ArrayList<Piece>();
+                                                    for (int y = startY; y < startY + 2; y++)
+                                                        if ((needed
+                                                                        & (1
+                                                                                << (sourceColumn
+                                                                                        | ((y
+                                                                                                        - startY)
+                                                                                                << 2))))
+                                                                != 0) {
+                                                            CompoundTag section =
+                                                                    sectionTags.get(y);
+                                                            if (section == null)
+                                                                throw new CompletionException(
+                                                                        new IOException(
+                                                                                "dirty source"
+                                                                                        + " sections"
+                                                                                        + " not saved yet"));
+                                                            DataLayer sky =
+                                                                    light(section, "SkyLight");
+                                                            if (sky == null)
+                                                                sky =
+                                                                        com.dripps.voxyserver.sync.SkyLightSnapshot
+                                                                                .inheritAbove(
+                                                                                        y,
+                                                                                        level.getMaxSectionY(),
+                                                                                        skyLayers);
+                                                            list.add(
+                                                                    new Piece(
+                                                                            null,
+                                                                            section,
+                                                                            null,
+                                                                            sky,
+                                                                            x,
+                                                                            y,
+                                                                            z));
                                                         }
                                                     if (list.size() != Integer.bitCount(needed))
                                                         throw new CompletionException(

@@ -37,6 +37,24 @@ public final class NativeVersionSyncTest {
                         require(
                                 inherited.get(x, y, z) == ((x + z) & 15),
                                 "inherited skylight columns mixed");
+            var upperLayer = new net.minecraft.world.level.chunk.DataLayer();
+            for (int y = 0; y < 16; y++)
+                for (int z = 0; z < 16; z++)
+                    for (int x = 0; x < 16; x++)
+                        upperLayer.set(x, y, z, (x + y * 3 + z * 5) & 15);
+            var inheritedLayer =
+                    SkyLightSnapshot.inheritAbove(4, 10, Map.of(6, upperLayer));
+            for (int y = 0; y < 16; y++)
+                for (int z = 0; z < 16; z++)
+                    for (int x = 0; x < 16; x++)
+                        require(
+                                inheritedLayer.get(x, y, z) == upperLayer.get(x, y, z),
+                                "missing section did not inherit the full upper sky-light layer");
+            var defaultSky = SkyLightSnapshot.inheritAbove(10, 10, Map.of());
+            for (int y = 0; y < 16; y++)
+                for (int z = 0; z < 16; z++)
+                    for (int x = 0; x < 16; x++)
+                        require(defaultSky.get(x, y, z) == 15, "top sky-light default was not 15");
             versions.bootstrap(dim, c -> {});
             server.setDirtyCallback(
                     (s, flags, neighbors) -> {

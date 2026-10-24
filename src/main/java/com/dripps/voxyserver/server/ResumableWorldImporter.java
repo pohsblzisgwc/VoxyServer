@@ -176,11 +176,16 @@ final class ResumableWorldImporter {
         if (chunk.getIntOr("xPos", Integer.MIN_VALUE) != x || chunk.getIntOr("zPos", Integer.MIN_VALUE) != z) {
             throw new IOException("Chunk position mismatch at " + x + ", " + z);
         }
+        if (!chunk.getBooleanOr("isLightOn", false))
+            throw new IOException("Chunk lighting is incomplete at " + x + ", " + z);
         Map<Integer, CompoundTag> sections = new HashMap<>();
+        Map<Integer, DataLayer> skyLayers = new HashMap<>();
         for (var tag : chunk.getList("sections").orElseThrow(() -> new IOException("Missing chunk sections"))) {
             if (!(tag instanceof CompoundTag section)) throw new IOException("Invalid chunk section");
             int y = section.getIntOr("Y", Integer.MIN_VALUE);
             if (y == Integer.MIN_VALUE || sections.put(y, section) != null) throw new IOException("Invalid section Y");
+            DataLayer sky = light(section, "SkyLight");
+            if (sky != null) skyLayers.put(y, sky);
         }
         for (int y = level.getMinSectionY(); y <= level.getMaxSectionY(); y++) {
             checkCancelled();
@@ -193,9 +198,13 @@ final class ResumableWorldImporter {
                     : palettes.createForBiomes();
             var blockLight = light(section, "BlockLight");
             var skyLight = light(section, "SkyLight");
+            if (skyLight == null)
+                skyLight = com.dripps.voxyserver.sync.SkyLightSnapshot.inheritAbove(
+                        y, level.getMaxSectionY(), skyLayers);
+            final DataLayer effectiveSkyLight = skyLight;
             var voxelized = WorldConversionFactory.convert(VoxelizedSection.createEmpty().setPosition(x, y, z),
                     world.getMapper(), blocks, biomes, (bx, by, bz) -> (byte) (
-                            (skyLight == null ? 0 : skyLight.get(bx, by, bz))
+                            effectiveSkyLight.get(bx, by, bz)
                                     | ((blockLight == null ? 0 : blockLight.get(bx, by, bz)) << 4)));
             WorldVoxilizedSectionMipper.mipSection(voxelized, world.getMapper());
             for (int lod = 0; lod <= WorldEngine.MAX_LOD_LAYER; lod++) {
